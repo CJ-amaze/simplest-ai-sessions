@@ -42,10 +42,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     store,
     (key) => void focusTerminal(store, key),
     () => vscode.window.createTerminal().show(), // ＋ 새 터미널 — 세션 시작용
+    (shellPid) => void focusTerminalByShellPid(shellPid),
   );
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(SidebarProvider.viewId, provider),
   );
+  sidebar = provider;
   const offChange = store.onChange(() => provider.refresh());
   context.subscriptions.push({ dispose: offChange });
 
@@ -63,6 +65,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.window.onDidChangeActiveTerminal((t) => void updateActiveTerminal(t)),
   );
   void updateActiveTerminal(vscode.window.activeTerminal);
+  // 터미널 생성/종료 시 목록을 5초 기다리지 않고 즉시 반영
+  context.subscriptions.push(
+    vscode.window.onDidOpenTerminal(() => remap()),
+    vscode.window.onDidCloseTerminal(() => remap()),
+  );
 
   // single-flight 헬퍼 — interval보다 오래 걸려도 중첩 금지. 단 60초 넘게 안 끝나는 flight는
   // 멈춘 것으로 간주하고 새 flight를 허용 (fs/터미널 API가 영구 pending 되어도 자기치유)
@@ -334,6 +341,25 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper): Promise
   for (const key of r.exited) store.setProcess(key, { alive: false });
   // 세션 파일이 아직 없는 프로세스(첫 쿼리 전 codex 등)는 플레이스홀더 카드로 표시
   store.syncPlaceholders(r.orphanProcs, passStartedAt);
+  // 세션이 붙지 않은 일반 터미널도 목록에 — "+ New Terminal" 직후 바로 보이도록
+  const used = store.usedShellPids();
+  const plain: Array<{ name?: string; shellPid: number }> = [];
+  for (const [pid, name] of shellPids) {
+    if (!used.has(pid)) plain.push({ name, shellPid: pid });
+  }
+  sidebar?.setTerminals(plain);
+}
+
+/** refreshMapping이 provider에 접근할 수 있도록 activate에서 주입 */
+let sidebar: SidebarProvider | undefined;
+
+async function focusTerminalByShellPid(shellPid: number): Promise<void> {
+  for (const term of vscode.window.terminals) {
+    if ((await term.processId) === shellPid) {
+      term.show();
+      return;
+    }
+  }
 }
 
 export function deactivate(): void {}

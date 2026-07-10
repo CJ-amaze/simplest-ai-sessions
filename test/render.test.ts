@@ -90,4 +90,16 @@ describe('renderCards', () => {
     expect(html.match(/ active"/g) ?? []).toHaveLength(1);
     expect(renderCards([view({ shellPid: 600 })])).not.toContain(' active"'); // 활성 정보 없으면 없음
   });
+  it('세션 없는 일반 터미널은 하단 행으로 표시 — 클릭용 data-shellpid + 활성 하이라이트', () => {
+    const html = renderCards([view({})], 600, [
+      { name: 'zsh', shellPid: 600 }, { name: 'zsh (2)', shellPid: 700 },
+    ]);
+    expect(html).toContain('data-shellpid="600"');
+    expect(html).toContain('zsh (2)');
+    expect(html).toContain('term active'); // 활성 터미널 행 강조
+    // 세션이 없어도 터미널이 있으면 empty 문구 대신 터미널 행
+    const only = renderCards([], undefined, [{ name: 'zsh', shellPid: 800 }]);
+    expect(only).not.toContain('No AI sessions detected');
+    expect(only).toContain('data-shellpid="800"');
+  });
 });

@@ -24,10 +24,23 @@ const STATUS_LABEL: Record<string, string> = {
   approval: '⚠ Needs approval', running: '● Working', idle: '○ Idle', exited: '✕ Exited',
 };
 
-export function renderCards(sessions: SessionView[], activeShellPid?: number): string {
-  if (sessions.length === 0) {
+export interface PlainTerminal { name?: string; shellPid: number }
+
+export function renderCards(
+  sessions: SessionView[], activeShellPid?: number, terminals: PlainTerminal[] = [],
+): string {
+  const termRows = terminals
+    .map((t) =>
+      `<div class="term${t.shellPid === activeShellPid ? ' active' : ''}" data-shellpid="${t.shellPid}">▷ ${esc(t.name ?? 'terminal')} <span class="hint">— run claude or codex</span></div>`,
+    )
+    .join('\n');
+  if (sessions.length === 0 && terminals.length === 0) {
     return '<div class="empty">No AI sessions detected<br/>Run claude or codex in a terminal</div>';
   }
+  return renderSessionCards(sessions, activeShellPid) + (termRows ? `\n${termRows}` : '');
+}
+
+function renderSessionCards(sessions: SessionView[], activeShellPid?: number): string {
   return sessions
     .map((s) => {
       const pct =
@@ -93,6 +106,13 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); 
 .subagent.approval { color: var(--vscode-editorWarning-foreground);
   border-left-color: var(--vscode-inputValidation-warningBorder); }
 .subagent.running { color: var(--vscode-charts-green); }
+.term { border: 1px dashed var(--vscode-panel-border); border-radius: 6px; padding: 6px 10px;
+  margin-bottom: 6px; cursor: pointer; font-size: 0.9em; opacity: 0.75;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.term:hover { background: var(--vscode-list-hoverBackground); opacity: 1; }
+.term.active { border-color: var(--vscode-focusBorder); border-style: solid; opacity: 1;
+  background: var(--vscode-list-activeSelectionBackground); }
+.term .hint { opacity: 0.6; font-size: 0.9em; }
 .bar { display: inline-block; width: 40px; height: 6px; border-radius: 3px;
   background: var(--vscode-input-background, #444); position: relative; vertical-align: middle; overflow: hidden; }
 .bar > span { display: block; height: 100%; border-radius: 3px;
@@ -110,7 +130,9 @@ window.addEventListener('message', (e) => {
 });
 document.addEventListener('click', (e) => {
   const card = e.target.closest('[data-key]');
-  if (card) vscode.postMessage({ command: 'focus', key: card.dataset.key });
+  if (card) { vscode.postMessage({ command: 'focus', key: card.dataset.key }); return; }
+  const term = e.target.closest('[data-shellpid]');
+  if (term) vscode.postMessage({ command: 'focusTerm', shellPid: Number(term.dataset.shellpid) });
 });
 document.getElementById('newTerm').addEventListener('click', () => {
   vscode.postMessage({ command: 'newTerminal' });

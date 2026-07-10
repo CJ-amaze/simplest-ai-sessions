@@ -132,6 +132,15 @@ export class StateStore {
     return this.sessions.get(key);
   }
 
+  /** 살아있는 세션(플레이스홀더 포함)이 점유한 VS Code 터미널 shell pid 집합 */
+  usedShellPids(): Set<number> {
+    const out = new Set<number>();
+    for (const s of this.sessions.values()) {
+      if (s.processAlive !== false && s.shellPid !== undefined) out.add(s.shellPid);
+    }
+    return out;
+  }
+
   /**
    * 세션 파일이 아직 없는 살아있는 agent 프로세스의 플레이스홀더 카드 동기화.
    * 프로세스가 죽거나 실제 세션을 클레임하면 다음 pass에서 조용히 제거된다 (dim 없음).
