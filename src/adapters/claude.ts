@@ -57,7 +57,9 @@ export function applyClaudeLine(acc: ClaudeAccum, line: string): boolean {
     acc.mode = d.permissionMode;
     changed = true;
   } else if (d.type === 'mode' && typeof d.mode === 'string') {
-    acc.sessionMode = d.mode; // normal / ultracode / fast 등
+    // 'normal'은 항상 기록되는 내부 기본값 — 사용자에게 의미 있는 값만 보관
+    // (현 버전 transcript엔 effort/ultracode가 기록되지 않음; 기록되기 시작하면 자동 표시)
+    acc.sessionMode = d.mode === 'normal' ? undefined : d.mode;
     changed = true;
   }
 

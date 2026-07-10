@@ -2,7 +2,7 @@
   "name": "simplest-ai-sessions",
   "displayName": "Simplest AI Sessions",
   "description": "The simplest AI session manager for VS Code — a local, passive monitor for Claude Code & Codex CLI sessions. No API keys, no LLM calls.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "cj-amaze",
   "private": true,
   "license": "MIT",
