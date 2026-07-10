@@ -11,15 +11,15 @@ One sidebar that shows every [Claude Code](https://claude.com/claude-code) and [
 
 ```
 ┌────────────────────────────────────────┐
-│ ● Working   claude · claude-fable-5    │   ← status you can trust
-│ bypassPermissions · pid 94052          │
+│ ● Working   claude-fable-5             │   ← status you can trust
+│ max·bypassPermissions · pid 94052      │   ← effort · permission mode · pid
 │ Making a video with the MCP tools      │   ← session topic
 │ ~/projects/my-app (main)               │   ← cwd + git branch
 │ 8.1M tok · ▂▂▂ 39% · $9.26            │   ← tokens · context % · est. cost
 └────────────────────────────────────────┘
 ```
 
-- **Honest statuses.** The rule is simple: *if you can type into the terminal right now, it's `Idle` (or `Needs approval`) — everything else is `Working`.* Long silent tool runs, remote MCP calls, extended thinking: still `Working`. The moment a turn ends (or you press Esc), it drops to `Idle`.
+- **Honest statuses.** The rule is simple: *if you can type into the terminal right now, it's `Idle` (or `Needs approval`) — everything else is `Working`.* Long silent tool runs, remote MCP calls, extended thinking: still `Working`. When a turn ends, it drops to `Idle`. On recent Claude Code versions the extension reads Claude Code's own busy/idle state directly.
 - **Needs-approval badge.** Sessions waiting on a permission prompt are highlighted, and the sidebar badge counts them — no more discovering an agent has been blocked for 20 minutes.
 - **Click a card → focus its terminal.** The card for the currently active terminal is highlighted.
 - **Cards = live processes.** Dead sessions, resume leftovers, and bootstrap ghosts never show. A freshly opened `codex` that hasn't received its first query yet shows as a placeholder card.
@@ -44,7 +44,7 @@ npm run package        # → simplest-ai-sessions-<version>.vsix
 code --install-extension simplest-ai-sessions-*.vsix
 ```
 
-On first run it offers to install **hooks** (a Claude Code `Stop`/`Notification` hook and a codex `notify` entry) so approval-waiting and turn boundaries are detected precisely. Existing settings are preserved and backed up (`*.agent-monitor.bak`); `AI Sessions: Remove hooks` cleanly removes only its own entries. Without hooks it still works in a degraded mode (30-second activity window, no approval detection for Claude).
+On first run it offers to install **hooks** (a Claude Code `Stop`/`Notification` hook and a codex `notify` entry) so approval-waiting and turn boundaries are detected precisely, plus an optional **statusLine** entry that lets cards show each Claude session's effort level (only added if you don't already have a statusLine). Existing settings are preserved and backed up (`*.agent-monitor.bak`); `AI Sessions: Remove hooks` cleanly removes only its own entries. Without hooks it still works in a degraded mode (30-second activity window, no approval detection for Claude).
 
 ## Requirements
 
@@ -59,6 +59,8 @@ Three local signal sources, reconciled every few seconds:
 1. **Transcript tailing** — `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/rollout-*.jsonl` are tailed incrementally (256 KB bootstrap window). Model, topic, tokens, turn boundaries, and per-line timestamps come from here.
 2. **Process reconciliation** — `ps` snapshots map live `claude`/`codex` processes to sessions (native session files → hook-verified pid → stored pid → launch-cwd heuristic → singleton pairing) and enforce the invariant *cards = live processes*.
 3. **Hook events** — the installed hooks append one JSON line per event to `~/.vscode-agent-monitor/events.jsonl` (locally). This is how `Stop`, permission requests, and idle notifications are detected the moment they happen.
+
+On recent Claude Code versions (2.1.20x+), Claude Code's own per-session state files provide busy/idle directly and take precedence over inference.
 
 Diagnostics: Output panel → **AI Sessions** channel (heartbeat + errors).
 
