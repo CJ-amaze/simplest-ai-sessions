@@ -90,6 +90,8 @@ export interface ReconcileInput {
   sessions: ReadonlyArray<ReconcileSession>;
   /** 사전 조회된 agent 프로세스 cwd (없으면 휴리스틱 매칭 불가) */
   cwdByPid: Map<number, string | undefined>;
+  /** Claude Code 자체 선언 바인딩 (~/.claude/sessions/<pid>.json) — pid → sessionId. 최우선 신호 */
+  nativeBindings?: Map<number, string>;
   now: number;
 }
 
@@ -119,7 +121,7 @@ export interface ReconcileResult {
  * — "카드 수 = 살아있는 agent 프로세스 수" 불변식.
  */
 export function reconcileSessions(input: ReconcileInput): ReconcileResult {
-  const { byPid, shellPids, sessions, cwdByPid, now } = input;
+  const { byPid, shellPids, sessions, cwdByPid, nativeBindings, now } = input;
   // 래퍼 collapse: "직계 부모"가 같은 agent인 프로세스만 제외 (node 래퍼 → 바이너리는 항상
   // 직접 부모-자식). 진짜 동종 서브에이전트는 셸(zsh -c)을 거쳐 스폰되므로 걸러지지 않음.
   const agents = input.agents.filter((p) => {
@@ -147,6 +149,20 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
     });
   };
 
+  // pass 0: Claude Code 자체 선언 (~/.claude/sessions/<pid>.json) — 추측이 아닌 사실.
+  // 어떤 휴리스틱·저장값과 충돌해도 이것이 이긴다
+  if (nativeBindings) {
+    for (const proc of agents) {
+      if (sessionByProc.has(proc.pid)) continue;
+      const agent = detectAgent(proc.command);
+      if (!agent) continue;
+      const sid = nativeBindings.get(proc.pid);
+      if (!sid) continue;
+      const key = `${agent}:${sid}`;
+      const match = sessions.find((s) => s.key === key && !claimedSessions.has(key));
+      if (match) claim(proc, match, 'exact');
+    }
+  }
   // pass 1/2: exact — hookPid(가장 강한 신호)가 먼저, 저장된 pid는 그다음.
   // 순서가 반대면 재시작 레이스 등으로 한 번 잘못 저장된 pid가 영원히 고착되어
   // 올바른 hookPid가 도착해도 교정 기회를 얻지 못한다 (우선순위 역전)

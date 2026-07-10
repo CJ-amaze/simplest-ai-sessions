@@ -115,6 +115,21 @@ describe('reconcileSessions', () => {
     expect(r.claims[0]).toMatchObject({ key: 'claude:a', mapping: 'exact' });
   });
 
+  it('pass 0: Claude Code 자체 선언 바인딩(~/.claude/sessions)이 모든 신호를 이김', () => {
+    const procA = { pid: 700, ppid: 600, pcpu: 0, command: 'claude' };
+    const r = reconcileSessions(makeInput({
+      agents: [procA], byPid: new Map([[700, procA]]),
+      cwdByPid: new Map([[700, '/w']]),
+      nativeBindings: new Map([[700, 'real-session']]),
+      sessions: [
+        sess('claude:real-session', { cwd: '/elsewhere' }),           // cwd 불일치여도
+        sess('claude:imposter', { pid: 700, hookPid: 700, cwd: '/w' }), // pid·hookPid·cwd 다 가진 사칭 세션보다
+      ],
+    }));
+    expect(r.claims[0]).toMatchObject({ key: 'claude:real-session', pid: 700, mapping: 'exact' });
+    expect(r.exited).toEqual(['claude:imposter']);
+  });
+
   it('hookPid가 저장된 pid보다 우선 — 재시작 레이스로 잘못 고착된 바인딩을 매 pass 교정', () => {
     // 명함/힉스필드 스왑 재현: 세션 A에 B의 pid가 잘못 저장된 상태에서 A의 hookPid가 도착
     const procA = { pid: 700, ppid: 600, pcpu: 0, command: 'claude' };

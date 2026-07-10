@@ -227,6 +227,33 @@ async function refreshTurnTracking(store: StateStore, scriptPath: string): Promi
 }
 
 /** 카드 클릭 → 터미널 포커스. 터미널 이름은 중복 가능하므로 shellPid로 식별 */
+/**
+ * Claude Code가 직접 기록하는 세션 상태 파일 (~/.claude/sessions/<pid>.json, v2.1.206+)
+ * — pid ↔ sessionId 정확 바인딩. 존재하면 매핑 추측이 전혀 필요 없다.
+ */
+async function readNativeBindings(): Promise<Map<number, string>> {
+  const map = new Map<number, string>();
+  const dir = path.join(os.homedir(), '.claude', 'sessions');
+  let entries: string[] = [];
+  try {
+    entries = await fs.promises.readdir(dir);
+  } catch {
+    return map; // 구버전 Claude Code — 디렉토리 없음
+  }
+  for (const name of entries) {
+    if (!name.endsWith('.json')) continue;
+    try {
+      const d = JSON.parse(await fs.promises.readFile(path.join(dir, name), 'utf8')) as {
+        pid?: number; sessionId?: string;
+      };
+      if (typeof d.pid === 'number' && typeof d.sessionId === 'string') map.set(d.pid, d.sessionId);
+    } catch {
+      // 손상/쓰는 중 — 무시
+    }
+  }
+  return map;
+}
+
 async function focusTerminal(store: StateStore, key: string): Promise<void> {
   // find(): 플레이스홀더(첫 쿼리 전 codex 등) 카드도 포커스 가능해야 함 — all()은 이를 제외한다
   const s = store.find(key);
@@ -261,7 +288,9 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper): Promise
 
   const r = reconcileSessions({
     agents: snap.agents, byPid: snap.byPid, shellPids,
-    sessions: store.all(), cwdByPid, now: passStartedAt,
+    sessions: store.all(), cwdByPid,
+    nativeBindings: await readNativeBindings(),
+    now: passStartedAt,
   });
   // claim과 parentKey를 한 번의 setProcess로 — 분리 적용하면 자식이 parentKey 설정 전
   // 렌더 한 프레임 동안 최상위 카드로 노출됨
