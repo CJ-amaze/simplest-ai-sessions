@@ -12,7 +12,7 @@ describe('CodexAdapter', () => {
     for (const l of lines) if (l.trim()) applyCodexLine(acc, l);
     const f = codexFields(acc);
     expect(f.model).toBe('gpt-5.6-sol');
-    expect(f.mode).toBe('never·workspace-write');
+    expect(f.mode).toBe('max·never·workspace-write');
     expect(f.cwd).toBe('/Users/dev/Desktop/CJI');
     expect(f.topic!.length).toBeLessThanOrEqual(60);
     expect(f.topic!.endsWith('…')).toBe(true);

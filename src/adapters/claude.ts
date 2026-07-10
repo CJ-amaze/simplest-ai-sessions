@@ -6,6 +6,7 @@ const TOPIC_MAX = 60;
 export interface ClaudeAccum {
   model?: string;
   mode?: string;
+  sessionMode?: string;     // 세션 모드 라인(type:"mode") — normal/ultracode 등
   aiTitle?: string;
   lastPrompt?: string;
   cwd?: string;
@@ -54,6 +55,9 @@ export function applyClaudeLine(acc: ClaudeAccum, line: string): boolean {
     changed = true;
   } else if (d.type === 'permission-mode' && typeof d.permissionMode === 'string') {
     acc.mode = d.permissionMode;
+    changed = true;
+  } else if (d.type === 'mode' && typeof d.mode === 'string') {
+    acc.sessionMode = d.mode; // normal / ultracode / fast 등
     changed = true;
   }
 
@@ -165,7 +169,7 @@ function truncate(s: string | undefined, max: number): string | undefined {
 export function claudeFields(acc: ClaudeAccum): SessionFields {
   return {
     model: acc.model,
-    mode: acc.mode,
+    mode: [acc.sessionMode, acc.mode].filter(Boolean).join('·') || undefined,
     topic: acc.aiTitle ?? truncate(acc.lastPrompt, TOPIC_MAX),
     cwd: acc.cwd,
     launchCwd: acc.launchCwd,

@@ -55,7 +55,7 @@ describe('renderCards', () => {
     const html = renderCards([view({ children: [child] })]);
     expect(html).toContain('class="subagent approval"');
     expect(html).toContain('data-key="codex:b&quot;&amp;"');
-    expect(html).toContain('⚠ Needs approval · codex · &lt;gpt&gt; · &lt;작업&gt;');
+    expect(html).toContain('⚠ Needs approval · &lt;gpt&gt; · &lt;작업&gt;');
     expect(html).not.toContain('claude:grandchild'); // 1단계만 렌더
   });
 

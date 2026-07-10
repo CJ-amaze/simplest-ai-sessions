@@ -5,6 +5,7 @@ const TOPIC_MAX = 60;
 export interface CodexAccum {
   model?: string;
   approvalPolicy?: string;
+  effort?: string;          // turn_context.effort — max/high 등
   sandbox?: string;
   cwd?: string;
   launchCwd?: string;
@@ -46,6 +47,7 @@ export function applyCodexLine(acc: CodexAccum, line: string): boolean {
   } else if (d.type === 'turn_context') {
     if (typeof p.model === 'string') { acc.model = p.model; changed = true; }
     if (typeof p.approval_policy === 'string') { acc.approvalPolicy = p.approval_policy; changed = true; }
+    if (typeof p.effort === 'string') { acc.effort = p.effort; changed = true; }
     const sb = p.sandbox_policy as Record<string, unknown> | undefined;
     if (sb && typeof sb.type === 'string') { acc.sandbox = sb.type; changed = true; }
     if (typeof p.cwd === 'string') { acc.cwd = p.cwd; changed = true; }
@@ -88,9 +90,7 @@ function truncate(s: string | undefined, max: number): string | undefined {
 export function codexFields(acc: CodexAccum): SessionFields {
   return {
     model: acc.model,
-    mode: acc.approvalPolicy || acc.sandbox
-      ? [acc.approvalPolicy, acc.sandbox].filter(Boolean).join('·')
-      : undefined,
+    mode: [acc.effort, acc.approvalPolicy, acc.sandbox].filter(Boolean).join('·') || undefined,
     topic: truncate(acc.lastUserMessage, TOPIC_MAX),
     cwd: acc.cwd,
     launchCwd: acc.launchCwd,

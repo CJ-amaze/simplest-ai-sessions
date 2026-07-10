@@ -38,7 +38,7 @@ export function renderCards(sessions: SessionView[], activeShellPid?: number): s
       const meta2 = [shortPath(s.cwd), s.gitBranch ? `(${s.gitBranch})` : '']
         .filter(Boolean).join(' ');
       const children = (s.children ?? []).map((child) =>
-        `  <div class="subagent ${esc(child.status)}" data-key="${esc(child.key)}">└ ${STATUS_LABEL[child.status]} · ${esc(child.agent)} · ${esc(child.model ?? '?')} · ${esc(child.topic ?? '')}</div>`,
+        `  <div class="subagent ${esc(child.status)}" data-key="${esc(child.key)}">└ ${STATUS_LABEL[child.status]} · ${esc(child.model ?? child.agent)} · ${esc(child.topic ?? '')}</div>`,
       ).join('\n');
       // 현재 활성(선택된) 터미널의 세션 카드 강조
       const isActive = activeShellPid !== undefined && s.shellPid === activeShellPid;
@@ -46,7 +46,7 @@ export function renderCards(sessions: SessionView[], activeShellPid?: number): s
       const title = s.topic ?? s.terminalName ?? (s.mapping === 'none' ? 'external terminal' : '');
       return `<div class="card ${s.status}${s.status === 'exited' ? ' dim' : ''}${isActive ? ' active' : ''}" data-key="${esc(s.key)}">
   <div class="row1"><span class="status">${STATUS_LABEL[s.status]}</span>
-    <span class="agent">${esc(s.agent)}</span> · <span class="model">${esc(s.model ?? '?')}</span></div>
+    <span class="model">${esc(s.model ?? s.agent)}</span></div>
   <div class="row2">${esc(s.mode ?? '')}${s.pid !== undefined ? ` · pid ${s.pid}` : ''}</div>
   <div class="topic">${esc(title)}</div>
   <div class="row3">${esc(meta2)}</div>

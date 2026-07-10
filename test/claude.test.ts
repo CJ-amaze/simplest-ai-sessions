@@ -26,6 +26,13 @@ describe('ClaudeAdapter', () => {
     expect(f.costUsd).toBeGreaterThan(0);
   });
 
+  it('세션 모드(type:"mode") 파싱 — 권한모드와 결합 표시 (normal/ultracode 등)', () => {
+    const acc = newClaudeAccum();
+    applyClaudeLine(acc, JSON.stringify({ type: 'mode', mode: 'ultracode' }));
+    applyClaudeLine(acc, JSON.stringify({ type: 'permission-mode', permissionMode: 'bypassPermissions' }));
+    expect(claudeFields(acc).mode).toBe('ultracode·bypassPermissions');
+  });
+
   it('aiTitle 없으면 lastPrompt를 topic으로', () => {
     const acc = newClaudeAccum();
     applyClaudeLine(acc, JSON.stringify({ type: 'last-prompt', lastPrompt: '긴 프롬프트'.repeat(50) }));
