@@ -85,6 +85,23 @@ describe('computeStatus', () => {
     expect(computeStatus({ now: T + 60_000, processAlive: true, lastActivityAt: T })).toBe('idle');
   });
 
+  // ── Claude Code 자체 선언 상태 (2.1.206+ 세션 파일) — 있으면 추론보다 우선 ──
+  it('nativeStatus가 있으면 그대로 신뢰 — idle이면 턴이 열려 보여도 대기 (Esc 즉시 반영)', () => {
+    expect(computeStatus({
+      now: T + 60_000, processAlive: true, turnTrackingReliable: true,
+      lastActivityAt: T, turnStartedAt: T, nativeStatus: 'idle',
+    })).toBe('idle');
+    expect(computeStatus({
+      now: T + 60_000, processAlive: true, lastActivityAt: T - 3600e3, nativeStatus: 'busy',
+    })).toBe('running');
+  });
+  it('nativeStatus busy여도 approval이 우선 (권한 대기는 입력 필요 상태)', () => {
+    expect(computeStatus({
+      now: T + 10_000, processAlive: true, lastActivityAt: T,
+      approvalAt: T + 1000, nativeStatus: 'busy',
+    })).toBe('approval');
+  });
+
   // ── 실작업(lastWorkAt) 기준 판정 — 늦은 메타 기록의 "작업 중" 부활 방지 ──
   it('턴 종료 후 늦게 온 메타 기록(system/ai-title)은 running을 되살리지 않음', () => {
     // 실작업은 stop 전에 끝났고(lastWorkAt < stoppedAt), 3분 뒤 메타 기록이 mtime만 갱신한 상황

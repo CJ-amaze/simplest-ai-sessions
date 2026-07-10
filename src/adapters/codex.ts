@@ -90,7 +90,8 @@ function truncate(s: string | undefined, max: number): string | undefined {
 export function codexFields(acc: CodexAccum): SessionFields {
   return {
     model: acc.model,
-    mode: [acc.effort, acc.approvalPolicy, acc.sandbox].filter(Boolean).join('·') || undefined,
+    mode: [acc.approvalPolicy, acc.sandbox].filter(Boolean).join('·') || undefined,
+    effort: acc.effort,
     topic: truncate(acc.lastUserMessage, TOPIC_MAX),
     cwd: acc.cwd,
     launchCwd: acc.launchCwd,

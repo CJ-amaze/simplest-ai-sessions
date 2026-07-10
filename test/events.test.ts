@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseHookEventLine } from '../src/hooks/events';
+import { parseHookEventLine, parseStatusLine } from '../src/hooks/events';
 
 describe('parseHookEventLine', () => {
   it('정상 이벤트 파싱', () => {
@@ -97,5 +97,19 @@ describe('agent-monitor-hook.sh (통합)', () => {
       .trim().split('\n').map((l) => parseHookEventLine(l)!);
     for (const e of events) expect(Math.abs(e.observedAt - Date.now())).toBeLessThan(10_000);
     expect(events.some((e) => e.observedAt % 1000 !== 0)).toBe(true); // ms 성분 존재
+  });
+
+  it('statusline shim: stdin JSON → status.jsonl 기록 + 표시줄 출력', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hookhome-'));
+    const input = JSON.stringify({
+      session_id: 'sess-9', model: { id: 'claude-fable-5', display_name: 'Fable 5' },
+      effort: { level: 'max' },
+    });
+    const out = execFileSync('bash', [join(__dirname, '../resources/agent-monitor-statusline.sh')], {
+      input, env: { ...process.env, HOME: home },
+    }).toString();
+    expect(out.trim()).toBe('Fable 5 · max');
+    const rec = parseStatusLine(readFileSync(join(home, '.vscode-agent-monitor/status.jsonl'), 'utf8').trim());
+    expect(rec).toEqual({ sessionId: 'sess-9', effort: 'max' });
   });
 });

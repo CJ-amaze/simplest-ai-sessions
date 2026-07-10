@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
   mergeClaudeSettings, mergeCodexConfig, removeClaudeHooks, removeCodexNotify,
-  installHooks,
+  installHooks, mergeStatusLine, removeStatusLine,
 } from '../src/hooks/installer';
 
 const SCRIPT = '/Users/x/.vscode/ext/dist/resources/agent-monitor-hook.sh';
@@ -130,9 +130,33 @@ describe('installHooks', () => {
   it('installHooks: 실제 파일에 installed→already', async () => {
     const home = mkdtempSync(join(tmpdir(), 'insthome-'));
     const r1 = await installHooks(home, SCRIPT);
-    expect(r1).toEqual({ claude: 'installed', codex: 'installed' });
+    expect(r1).toEqual({ claude: 'installed', codex: 'installed', statusline: 'skipped' });
     const r2 = await installHooks(home, SCRIPT);
-    expect(r2).toEqual({ claude: 'already', codex: 'already' });
+    expect(r2).toEqual({ claude: 'already', codex: 'already', statusline: 'skipped' });
     expect(readFileSync(join(home, '.claude/settings.json'), 'utf8')).toContain(SCRIPT);
+  });
+});
+
+describe('statusLine 연동', () => {
+  const SHIM = '/Users/dev/.vscode-agent-monitor/statusline.sh';
+  it('없으면 추가, 이미 우리 것이면 no-op', () => {
+    const r = mergeStatusLine('{}', SHIM);
+    expect(r.changed).toBe(true);
+    const obj = JSON.parse(r.result);
+    expect(obj.statusLine.command).toContain(SHIM);
+    expect(mergeStatusLine(r.result, SHIM).changed).toBe(false);
+  });
+  it('타 statusLine 존재 시 conflict — 건드리지 않음', () => {
+    const cur = JSON.stringify({ statusLine: { type: 'command', command: 'my-fancy-bar' } });
+    const r = mergeStatusLine(cur, SHIM);
+    expect(r.changed).toBe(false);
+    expect(r.conflict).toBeTruthy();
+    expect(r.result).toBe(cur);
+  });
+  it('제거는 우리 것일 때만', () => {
+    const ours = mergeStatusLine('{}', SHIM).result;
+    expect(JSON.parse(removeStatusLine(ours, SHIM).result).statusLine).toBeUndefined();
+    const theirs = JSON.stringify({ statusLine: { command: 'other' } });
+    expect(removeStatusLine(theirs, SHIM).changed).toBe(false);
   });
 });

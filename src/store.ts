@@ -96,6 +96,7 @@ export class StateStore {
       pid?: number; alive?: boolean; mapping?: MappingConfidence;
       terminalName?: string; shellPid?: number; parentKey?: string | null;
       busy?: boolean;
+      nativeStatus?: 'busy' | 'idle' | null; // null = 파일 사라짐 → 해제
     },
     now: number = Date.now(),
   ): void {
@@ -103,6 +104,8 @@ export class StateStore {
     if (!s) return;
     if (info.pid !== undefined) s.pid = info.pid;
     if (info.busy !== undefined) s.busy = info.busy;
+    if (info.nativeStatus === null) s.nativeStatus = undefined;
+    else if (info.nativeStatus !== undefined) s.nativeStatus = info.nativeStatus;
     if (info.mapping !== undefined) s.mapping = info.mapping;
     if (info.terminalName !== undefined) s.terminalName = info.terminalName;
     if (info.shellPid !== undefined) s.shellPid = info.shellPid;

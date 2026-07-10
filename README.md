@@ -16,13 +16,11 @@ One sidebar that shows every [Claude Code](https://claude.com/claude-code) and [
 │ Making a video with the MCP tools      │   ← session topic
 │ ~/projects/my-app (main)               │   ← cwd + git branch
 │ 8.1M tok · ▂▂▂ 39% · $9.26            │   ← tokens · context % · est. cost
-│  └ ● Working · codex · gpt-x · review  │   ← subagents nest inline
 └────────────────────────────────────────┘
 ```
 
 - **Honest statuses.** The rule is simple: *if you can type into the terminal right now, it's `Idle` (or `Needs approval`) — everything else is `Working`.* Long silent tool runs, remote MCP calls, extended thinking: still `Working`. The moment a turn ends (or you press Esc), it drops to `Idle`.
 - **Needs-approval badge.** Sessions waiting on a permission prompt are highlighted, and the sidebar badge counts them — no more discovering an agent has been blocked for 20 minutes.
-- **Subagents nest under their parent.** A `codex` spawned by a Claude session (pair-coding, cross-review, …) shows as a compact row inside the parent card, not as a mystery top-level session.
 - **Click a card → focus its terminal.** The card for the currently active terminal is highlighted.
 - **Cards = live processes.** Dead sessions, resume leftovers, and bootstrap ghosts never show. A freshly opened `codex` that hasn't received its first query yet shows as a placeholder card.
 - **`＋ New Terminal` button** at the bottom of the sidebar to start your next session.
@@ -59,7 +57,7 @@ On first run it offers to install **hooks** (a Claude Code `Stop`/`Notification`
 Three local signal sources, reconciled every few seconds:
 
 1. **Transcript tailing** — `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/rollout-*.jsonl` are tailed incrementally (256 KB bootstrap window). Model, topic, tokens, turn boundaries, and per-line timestamps come from here.
-2. **Process reconciliation** — `ps` snapshots map live `claude`/`codex` processes to sessions (hook-verified pid → stored pid → launch-cwd heuristic → singleton pairing), detect parent/child agent relationships via the process tree, and enforce the invariant *cards = live processes*.
+2. **Process reconciliation** — `ps` snapshots map live `claude`/`codex` processes to sessions (native session files → hook-verified pid → stored pid → launch-cwd heuristic → singleton pairing) and enforce the invariant *cards = live processes*.
 3. **Hook events** — the installed hooks append one JSON line per event to `~/.vscode-agent-monitor/events.jsonl` (locally). This is how `Stop`, permission requests, and idle notifications are detected the moment they happen.
 
 Diagnostics: Output panel → **AI Sessions** channel (heartbeat + errors).

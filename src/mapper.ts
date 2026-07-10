@@ -90,8 +90,8 @@ export interface ReconcileInput {
   sessions: ReadonlyArray<ReconcileSession>;
   /** 사전 조회된 agent 프로세스 cwd (없으면 휴리스틱 매칭 불가) */
   cwdByPid: Map<number, string | undefined>;
-  /** Claude Code 자체 선언 바인딩 (~/.claude/sessions/<pid>.json) — pid → sessionId. 최우선 신호 */
-  nativeBindings?: Map<number, string>;
+  /** Claude Code 자체 선언 바인딩 (~/.claude/sessions/<pid>.json) — 최우선 신호 */
+  nativeBindings?: Map<number, { sessionId: string; status?: 'busy' | 'idle' }>;
   now: number;
 }
 
@@ -100,6 +100,7 @@ export interface ReconcileResult {
     key: string; pid: number; mapping: 'exact' | 'heuristic';
     terminalName?: string; shellPid?: number;
     busy: boolean; // 프로세스 트리에 유의미한 CPU 사용 존재 (Esc 중단 vs 긴 도구 실행 판별)
+    nativeStatus?: 'busy' | 'idle'; // Claude Code 자체 선언 상태 (있을 때만)
   }>;
   /** 어느 프로세스도 클레임하지 않은 세션 — 즉시 exited 처리 대상 (등록 grace 지난 것만) */
   exited: string[];
@@ -146,6 +147,7 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
       terminalName: shellPid !== undefined ? shellPids.get(shellPid) : undefined,
       shellPid,
       busy: isBusy(proc.pid, byPid),
+      nativeStatus: nativeBindings?.get(proc.pid)?.status,
     });
   };
 
@@ -156,9 +158,9 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
       if (sessionByProc.has(proc.pid)) continue;
       const agent = detectAgent(proc.command);
       if (!agent) continue;
-      const sid = nativeBindings.get(proc.pid);
-      if (!sid) continue;
-      const key = `${agent}:${sid}`;
+      const nat = nativeBindings.get(proc.pid);
+      if (!nat) continue;
+      const key = `${agent}:${nat.sessionId}`;
       const match = sessions.find((s) => s.key === key && !claimedSessions.has(key));
       if (match) claim(proc, match, 'exact');
     }

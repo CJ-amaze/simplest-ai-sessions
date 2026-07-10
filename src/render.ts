@@ -47,7 +47,7 @@ export function renderCards(sessions: SessionView[], activeShellPid?: number): s
       return `<div class="card ${s.status}${s.status === 'exited' ? ' dim' : ''}${isActive ? ' active' : ''}" data-key="${esc(s.key)}">
   <div class="row1"><span class="status">${STATUS_LABEL[s.status]}</span>
     <span class="model">${esc(s.model ?? s.agent)}</span></div>
-  <div class="row2">${esc(s.mode ?? '')}${s.pid !== undefined ? ` · pid ${s.pid}` : ''}</div>
+  <div class="row2">${esc([s.effort, s.mode].filter(Boolean).join('·'))}${s.pid !== undefined ? ` · pid ${s.pid}` : ''}</div>
   <div class="topic">${esc(title)}</div>
   <div class="row3">${esc(meta2)}</div>
   <div class="row4">${fmtTokens(s.totalTokens)} tok${pct !== undefined ? ` · <span class="bar"><span style="width:${pct}%"></span></span> ${pct}%` : ''} · ${cost}</div>${children ? `\n${children}` : ''}

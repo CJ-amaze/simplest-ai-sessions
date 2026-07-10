@@ -21,6 +21,7 @@ export interface StatusInput {
   stoppedAt?: number;
   turnStartedAt?: number;          // 마지막 턴 시작 (claude=사용자 프롬프트, codex=task_started)
   turnTrackingReliable?: boolean;  // 턴 종료 신호를 신뢰 가능한가 (codex=rollout, claude=Stop 훅 확인 시)
+  nativeStatus?: 'busy' | 'idle';  // Claude Code 자체 선언 상태 — 추론이 아닌 사실, 있으면 최우선
 }
 
 export function computeStatus(s: StatusInput): Status {
@@ -38,6 +39,12 @@ export function computeStatus(s: StatusInput): Status {
     (s.stoppedAt === undefined || s.stoppedAt <= s.approvalAt) &&
     s.now - s.approvalAt < APPROVAL_TTL_MS;
   if (approvalActive) return 'approval';
+
+  // Claude Code가 자기 상태를 직접 선언하면(2.1.206+ 세션 파일) 추론 없이 그대로 —
+  // Esc 중단도 Claude Code가 idle로 쓰는 순간 즉시 반영된다
+  if (s.processAlive === true && s.nativeStatus !== undefined) {
+    return s.nativeStatus === 'busy' ? 'running' : 'idle';
+  }
 
   const reliable = s.turnTrackingReliable === true && s.processAlive === true;
   if (reliable) {

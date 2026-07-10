@@ -120,7 +120,7 @@ describe('reconcileSessions', () => {
     const r = reconcileSessions(makeInput({
       agents: [procA], byPid: new Map([[700, procA]]),
       cwdByPid: new Map([[700, '/w']]),
-      nativeBindings: new Map([[700, 'real-session']]),
+      nativeBindings: new Map([[700, { sessionId: 'real-session', status: 'busy' as const }]]),
       sessions: [
         sess('claude:real-session', { cwd: '/elsewhere' }),           // cwd 불일치여도
         sess('claude:imposter', { pid: 700, hookPid: 700, cwd: '/w' }), // pid·hookPid·cwd 다 가진 사칭 세션보다

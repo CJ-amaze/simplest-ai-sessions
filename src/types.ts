@@ -9,6 +9,7 @@ export interface SessionFields {
   gitBranch?: string;
   model?: string;
   mode?: string;            // claude: permissionMode / codex: "approval·sandbox"
+  effort?: string;          // 모델 effort — codex: rollout turn_context, claude: statusLine 연동
   topic?: string;
   totalTokens?: number;     // 세션 누적
   contextTokens?: number;   // 마지막 turn 컨텍스트 점유
@@ -32,6 +33,7 @@ export interface SessionState extends Required<Pick<SessionFields, 'lastActivity
   gitBranch?: string;
   model?: string;
   mode?: string;
+  effort?: string;
   topic?: string;
   totalTokens: number;
   contextTokens: number;
@@ -47,6 +49,7 @@ export interface SessionState extends Required<Pick<SessionFields, 'lastActivity
   hookPid?: number;         // 훅 이벤트 유래 pid 힌트 (매핑 검증용 — mapper가 생사 확인 후에만 신뢰)
   processAlive?: boolean;   // undefined = 미확인(외부)
   busy?: boolean;           // 프로세스 트리 CPU 사용 중 — 긴 도구/사고(작업중) vs Esc 중단(대기) 판별
+  nativeStatus?: 'busy' | 'idle'; // Claude Code 자체 상태(~/.claude/sessions/<pid>.json) — 있으면 최우선
   everAlive?: boolean;      // 이번 확장 수명 중 생존 확인된 적 있음 (부트스트랩 유령 즉시 제거용)
   mapping: MappingConfidence;
   parentKey?: string;       // 부모 세션 key (다른 agent 프로세스가 띄운 서브에이전트)

@@ -31,6 +31,30 @@ export function mergeClaudeSettings(json: string, scriptPath: string): { changed
   return { changed: true, result: JSON.stringify(obj, null, 2) };
 }
 
+/** settings.json에 statusLine 연동 추가 — 기존 statusLine이 있으면 건드리지 않음(conflict) */
+export function mergeStatusLine(
+  json: string, scriptPath: string,
+): { changed: boolean; result: string; conflict?: string } {
+  if (!scriptPath) return { changed: false, result: json };
+  const obj = JSON.parse(json || '{}') as Record<string, unknown>;
+  const cur = obj.statusLine as { command?: string } | undefined;
+  if (cur) {
+    if (cur.command?.includes(scriptPath)) return { changed: false, result: json };
+    return { changed: false, result: json, conflict: `기존 statusLine 존재: ${String(cur.command ?? '')}` };
+  }
+  obj.statusLine = { type: 'command', command: `"${scriptPath}"` };
+  return { changed: true, result: JSON.stringify(obj, null, 2) };
+}
+
+export function removeStatusLine(json: string, scriptPath: string): { changed: boolean; result: string } {
+  if (!scriptPath) return { changed: false, result: json };
+  const obj = JSON.parse(json || '{}') as Record<string, unknown>;
+  const cur = obj.statusLine as { command?: string } | undefined;
+  if (!cur?.command?.includes(scriptPath)) return { changed: false, result: json };
+  delete obj.statusLine;
+  return { changed: true, result: JSON.stringify(obj, null, 2) };
+}
+
 export function removeClaudeHooks(json: string, scriptPath: string): { changed: boolean; result: string } {
   if (!scriptPath) return { changed: false, result: json };
   const obj = JSON.parse(json || '{}') as Record<string, unknown>;
@@ -154,6 +178,10 @@ export function shimPath(homeDir: string): string {
   return join(homeDir, '.vscode-agent-monitor', 'hook.sh');
 }
 
+export function statusShimPath(homeDir: string): string {
+  return join(homeDir, '.vscode-agent-monitor', 'statusline.sh');
+}
+
 /** 번들 스크립트 내용을 고정 경로 shim에 (재)기록 — 설정 파일은 항상 이 경로를 참조 */
 export async function writeShim(homeDir: string, content: string): Promise<string> {
   const p = shimPath(homeDir);
@@ -163,10 +191,12 @@ export async function writeShim(homeDir: string, content: string): Promise<strin
 }
 
 export async function installHooks(
-  homeDir: string, scriptPath: string,
-): Promise<{ claude: string; codex: string }> {
-  if (!scriptPath) return { claude: 'error:empty scriptPath', codex: 'error:empty scriptPath' };
-  const out = { claude: 'error:unknown', codex: 'error:unknown' };
+  homeDir: string, scriptPath: string, statusScriptPath?: string,
+): Promise<{ claude: string; codex: string; statusline: string }> {
+  if (!scriptPath) {
+    return { claude: 'error:empty scriptPath', codex: 'error:empty scriptPath', statusline: 'skipped' };
+  }
+  const out = { claude: 'error:unknown', codex: 'error:unknown', statusline: 'skipped' };
   // claude
   try {
     const p = join(homeDir, '.claude', 'settings.json');
@@ -177,6 +207,16 @@ export async function installHooks(
       await atomicWrite(p, r.result);
       out.claude = 'installed';
     } else out.claude = 'already';
+    // statusLine — 세션별 model/effort 표시용 (기존 statusLine이 있으면 건드리지 않음)
+    if (statusScriptPath) {
+      const cur2 = (await readIfExists(p)) ?? '{}';
+      const sr = mergeStatusLine(cur2, statusScriptPath);
+      if (sr.conflict) out.statusline = 'conflict';
+      else if (sr.changed) {
+        await atomicWrite(p, sr.result);
+        out.statusline = 'installed';
+      } else out.statusline = 'already';
+    }
   } catch (e) {
     out.claude = `error:${String(e)}`;
   }
@@ -204,6 +244,11 @@ export async function removeHooks(homeDir: string, scriptPath: string): Promise<
   if (cur !== null) {
     const r = removeClaudeHooks(cur, scriptPath);
     if (r.changed) await atomicWrite(cp, r.result);
+    const cur2 = await readIfExists(cp);
+    if (cur2 !== null) {
+      const sr = removeStatusLine(cur2, statusShimPath(homeDir));
+      if (sr.changed) await atomicWrite(cp, sr.result);
+    }
   }
   const xp = join(homeDir, '.codex', 'config.toml');
   const cur2 = await readIfExists(xp);

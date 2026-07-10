@@ -3,8 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AdapterWatcher, claudeSpec, codexSpec } from './adapters/watcher';
-import { EVENTS_FILE, parseHookEventLine } from './hooks/events';
-import { installHooks, removeHooks, writeShim } from './hooks/installer';
+import { EVENTS_FILE, parseHookEventLine, parseStatusLine, STATUS_FILE } from './hooks/events';
+import { installHooks, removeHooks, statusShimPath, writeShim } from './hooks/installer';
 import { ProcessMapper, reconcileSessions } from './mapper';
 import { SidebarProvider } from './sidebar';
 import { StateStore } from './store';
@@ -31,6 +31,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const store = new StateStore();
   const tail = new TailReader();
   const eventsTail = new TailReader();
+  const statusTail = new TailReader();
   const mapper = new ProcessMapper();
   const watchers = [
     new AdapterWatcher(claudeSpec(), tail, (p) => store.applyPatch(p)),
@@ -127,6 +128,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         pending.push({ e, expiresAt: now + PENDING_TTL_MS });
       }
     }
+    // statusline 연동(설치 시) — 세션별 effort. 마지막 값만 유효하므로 재시도 큐 불필요
+    const st = await statusTail.readNewLines(STATUS_FILE, { bootstrapBytes: 16384 });
+    for (const l of st.lines) {
+      const rec = parseStatusLine(l);
+      if (!rec?.effort) continue;
+      const key = `claude:${rec.sessionId}`;
+      const cur = store.find(key);
+      if (!cur) continue; // 세션 미등록 — 다음 statusline 갱신에서 자연 반영
+      store.applyPatch({
+        agent: 'claude', sessionId: rec.sessionId, filePath: cur.filePath,
+        fields: { effort: rec.effort },
+      });
+    }
   };
   const drainEvents = singleFlight('events', doDrain);
   const eventsTimer = setInterval(drainEvents, EVENTS_MS);
@@ -152,11 +166,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const tickTimer = setInterval(() => provider.refresh(), 5_000);
   context.subscriptions.push({ dispose: () => clearInterval(tickTimer) });
 
-  // hook shim — 설정 파일에는 고정 경로만 기록 (확장 업그레이드로 번들 경로가 바뀌어도 불변)
+  // hook/statusline shim — 설정 파일에는 고정 경로만 기록 (확장 업그레이드로 번들 경로가 바뀌어도 불변)
   const bundled = context.asAbsolutePath(path.join('dist', 'resources', 'agent-monitor-hook.sh'));
+  const bundledStatus = context.asAbsolutePath(path.join('dist', 'resources', 'agent-monitor-statusline.sh'));
   let scriptPath = '';
+  let statusScript = '';
   try {
     scriptPath = await writeShim(os.homedir(), fs.readFileSync(bundled, 'utf8'));
+    statusScript = statusShimPath(os.homedir());
+    await fs.promises.writeFile(statusScript, fs.readFileSync(bundledStatus, 'utf8'), { mode: 0o755 });
   } catch (e) {
     void vscode.window.showWarningMessage(`AI Sessions: failed to write hook shim — ${String(e)}`);
   }
@@ -197,9 +215,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void vscode.window.showErrorMessage('AI Sessions: hook shim path is not ready.');
       return;
     }
-    const r = await installHooks(os.homedir(), script);
+    const r = await installHooks(os.homedir(), script, statusScript);
     await refreshTurnTracking(store, script);
-    void vscode.window.showInformationMessage(`AI Sessions hooks — claude: ${r.claude}, codex: ${r.codex}`);
+    void vscode.window.showInformationMessage(
+      `AI Sessions hooks — claude: ${r.claude}, codex: ${r.codex}, statusline: ${r.statusline}`,
+    );
   }
 }
 
@@ -231,8 +251,8 @@ async function refreshTurnTracking(store: StateStore, scriptPath: string): Promi
  * Claude Code가 직접 기록하는 세션 상태 파일 (~/.claude/sessions/<pid>.json, v2.1.206+)
  * — pid ↔ sessionId 정확 바인딩. 존재하면 매핑 추측이 전혀 필요 없다.
  */
-async function readNativeBindings(): Promise<Map<number, string>> {
-  const map = new Map<number, string>();
+async function readNativeBindings(): Promise<Map<number, { sessionId: string; status?: 'busy' | 'idle' }>> {
+  const map = new Map<number, { sessionId: string; status?: 'busy' | 'idle' }>();
   const dir = path.join(os.homedir(), '.claude', 'sessions');
   let entries: string[] = [];
   try {
@@ -244,9 +264,14 @@ async function readNativeBindings(): Promise<Map<number, string>> {
     if (!name.endsWith('.json')) continue;
     try {
       const d = JSON.parse(await fs.promises.readFile(path.join(dir, name), 'utf8')) as {
-        pid?: number; sessionId?: string;
+        pid?: number; sessionId?: string; status?: string;
       };
-      if (typeof d.pid === 'number' && typeof d.sessionId === 'string') map.set(d.pid, d.sessionId);
+      if (typeof d.pid === 'number' && typeof d.sessionId === 'string') {
+        map.set(d.pid, {
+          sessionId: d.sessionId,
+          status: d.status === 'busy' || d.status === 'idle' ? d.status : undefined,
+        });
+      }
     } catch {
       // 손상/쓰는 중 — 무시
     }
@@ -286,10 +311,10 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper): Promise
   const cwdByPid = new Map<number, string | undefined>();
   for (const proc of snap.agents) cwdByPid.set(proc.pid, await mapper.cwdOf(proc.pid));
 
+  const nativeBindings = await readNativeBindings();
   const r = reconcileSessions({
     agents: snap.agents, byPid: snap.byPid, shellPids,
-    sessions: store.all(), cwdByPid,
-    nativeBindings: await readNativeBindings(),
+    sessions: store.all(), cwdByPid, nativeBindings,
     now: passStartedAt,
   });
   // claim과 parentKey를 한 번의 setProcess로 — 분리 적용하면 자식이 parentKey 설정 전
@@ -301,6 +326,7 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper): Promise
       terminalName: c.terminalName, shellPid: c.shellPid,
       parentKey: parentByKey.get(c.key) ?? null,
       busy: c.busy,
+      nativeStatus: c.nativeStatus ?? null, // 파일 없으면 해제 (stale 상태 잔류 방지)
     });
   }
   // 어느 프로세스도 클레임하지 않은 세션 = 프로세스 소멸 — 즉시 exited
