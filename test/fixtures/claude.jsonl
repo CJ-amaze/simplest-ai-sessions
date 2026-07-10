@@ -1,0 +1,7 @@
+{"type":"user","cwd":"/Users/dev/Desktop/CJI","gitBranch":"main","sessionId":"aaaa","message":{"role":"user","content":"질문"}}
+{"type":"assistant","cwd":"/Users/dev/Desktop/CJI","gitBranch":"main","sessionId":"aaaa","message":{"model":"claude-fable-5","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":5000,"cache_creation_input_tokens":200}}}
+{"type":"ai-title","aiTitle":"모니터 툴 설계","sessionId":"aaaa"}
+{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"aaaa"}
+{"type":"last-prompt","lastPrompt":"진행하자","sessionId":"aaaa"}
+{"type":"assistant","cwd":"/Users/dev/Desktop/CJI","gitBranch":"main","sessionId":"aaaa","message":{"model":"claude-fable-5","usage":{"input_tokens":20,"output_tokens":300,"cache_read_input_tokens":6000,"cache_creation_input_tokens":100}}}
+깨진 라인 (json 아님)

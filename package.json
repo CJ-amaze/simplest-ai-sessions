@@ -1,0 +1,81 @@
+{
+  "name": "simplest-ai-sessions",
+  "displayName": "Simplest AI Sessions",
+  "description": "The simplest AI session manager for VS Code — a local, passive monitor for Claude Code & Codex CLI sessions. No API keys, no LLM calls.",
+  "version": "0.2.0",
+  "publisher": "cj-amaze",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiSessions",
+          "title": "AI Sessions",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "aiSessions": [
+        {
+          "type": "webview",
+          "id": "aiSessions.sidebar",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "aiSessions.show",
+        "title": "AI Sessions: Show"
+      },
+      {
+        "command": "aiSessions.installHooks",
+        "title": "AI Sessions: Install hooks"
+      },
+      {
+        "command": "aiSessions.removeHooks",
+        "title": "AI Sessions: Remove hooks"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.100.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CJ-amaze/simplest-ai-sessions"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "ai",
+    "session",
+    "monitor",
+    "terminal",
+    "agent"
+  ]
+}
