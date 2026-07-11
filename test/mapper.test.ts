@@ -131,7 +131,7 @@ describe('reconcileSessions', () => {
   });
 
   it('hookPid가 저장된 pid보다 우선 — 재시작 레이스로 잘못 고착된 바인딩을 매 pass 교정', () => {
-    // 명함/힉스필드 스왑 재현: 세션 A에 B의 pid가 잘못 저장된 상태에서 A의 hookPid가 도착
+    // 카드 스왑 재현: 세션 A에 B의 pid가 잘못 저장된 상태에서 A의 hookPid가 도착
     const procA = { pid: 700, ppid: 600, pcpu: 0, command: 'claude' };
     const procB = { pid: 710, ppid: 600, pcpu: 0, command: 'claude' };
     const r = reconcileSessions(makeInput({

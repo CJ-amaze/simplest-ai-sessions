@@ -6,7 +6,7 @@ import { AdapterWatcher, claudeSpec, codexSpec } from '../src/adapters/watcher';
 import { TailReader } from '../src/tail';
 import type { SessionPatch } from '../src/types';
 
-const SID = '2233146d-6b4f-4a1e-948c-d637183577d7';
+const SID = 'aaaabbbb-1111-4222-8333-cccccccc0001';
 const T = 1_000_000_000_000;
 
 function makeClaudeRoot(): { root: string; file: string } {

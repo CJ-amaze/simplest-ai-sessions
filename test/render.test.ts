@@ -68,8 +68,8 @@ describe('renderCards', () => {
   });
 
   it('주제 한 줄만: topic 우선, 없으면 터미널 이름 (중복 표시 없음)', () => {
-    const both = renderCards([view({ topic: '명함 사진 자르기', terminalName: '✳ 명함 사진 자르기' })]);
-    expect(both.match(/명함 사진 자르기/g)).toHaveLength(1); // 한 번만
+    const both = renderCards([view({ topic: '사진 일괄 리사이즈', terminalName: '✳ 사진 일괄 리사이즈' })]);
+    expect(both.match(/사진 일괄 리사이즈/g)).toHaveLength(1); // 한 번만
     const fallback = renderCards([view({ terminalName: 'zsh — 작업A' })]);
     expect(fallback).toContain('zsh — 작업A'); // topic 없으면 터미널 이름
   });
