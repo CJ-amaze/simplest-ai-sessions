@@ -3,6 +3,7 @@
 # Usage:
 #   agent-monitor-hook.sh claude notification|stop    (Claude Code hook: JSON on stdin)
 #   agent-monitor-hook.sh codex '<json>'              (codex notify: JSON as last arg)
+#   agent-monitor-hook.sh codex-hook                  (codex hook: JSON on stdin)
 AGENT="$1"
 DIR="$HOME/.vscode-agent-monitor"
 FILE="$DIR/events.jsonl"
@@ -26,6 +27,13 @@ if [ "$AGENT" = "claude" ]; then
       *waiting*) KIND="idle" ;;
     esac
   fi
+elif [ "$AGENT" = "codex-hook" ]; then
+  INPUT=$(cat)
+  SID=$(json_str "$INPUT" "session_id")
+  HOOK_EVENT=$(json_str "$INPUT" "hook_event_name")
+  KIND="notification"
+  [ "$HOOK_EVENT" = "PermissionRequest" ] && KIND="approval"
+  AGENT="codex"
 else
   PAYLOAD="$2"
   # payload 전문이 아니라 "type" 필드 값만으로 분기 — 자유 텍스트(예: last-assistant-message)에

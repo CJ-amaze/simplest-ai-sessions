@@ -31,6 +31,41 @@ export function mergeClaudeSettings(json: string, scriptPath: string): { changed
   return { changed: true, result: JSON.stringify(obj, null, 2) };
 }
 
+export function mergeCodexHooksJson(json: string, scriptPath: string): { changed: boolean; result: string } {
+  if (!scriptPath) return { changed: false, result: json };
+  const obj = JSON.parse(json || '{}') as Record<string, unknown>;
+  const hooks = (obj.hooks ?? {}) as Record<string, HookEntry[]>;
+  if (hasOurEntry(hooks.PermissionRequest, scriptPath)) return { changed: false, result: json };
+  hooks.PermissionRequest = [
+    ...(hooks.PermissionRequest ?? []),
+    { hooks: [{ type: 'command', command: `"${scriptPath}" codex-hook` }] },
+  ];
+  obj.hooks = hooks;
+  return { changed: true, result: JSON.stringify(obj, null, 2) };
+}
+
+export function removeCodexHooksJson(json: string, scriptPath: string): { changed: boolean; result: string } {
+  if (!scriptPath) return { changed: false, result: json };
+  const obj = JSON.parse(json || '{}') as Record<string, unknown>;
+  const hooks = (obj.hooks ?? {}) as Record<string, HookEntry[]>;
+  let changed = false;
+  for (const event of Object.keys(hooks)) {
+    hooks[event] = hooks[event]
+      .map((e) => {
+        if (!e.hooks) return e;
+        const kept = e.hooks.filter((h) => !h.command?.includes(scriptPath));
+        if (kept.length !== e.hooks.length) changed = true;
+        return { ...e, hooks: kept };
+      })
+      .filter((e) => e.hooks === undefined || e.hooks.length > 0);
+    if (hooks[event].length === 0) delete hooks[event];
+  }
+  if (!changed) return { changed: false, result: json };
+  if (Object.keys(hooks).length === 0) delete obj.hooks;
+  else obj.hooks = hooks;
+  return { changed: true, result: JSON.stringify(obj, null, 2) };
+}
+
 /** settings.json에 statusLine 연동 추가 — 기존 statusLine이 있으면 건드리지 않음(conflict) */
 export function mergeStatusLine(
   json: string, scriptPath: string,
@@ -220,20 +255,40 @@ export async function installHooks(
   } catch (e) {
     out.claude = `error:${String(e)}`;
   }
-  // codex
+  let codexNotify = 'error:unknown';
   try {
     const p = join(homeDir, '.codex', 'config.toml');
     const cur = (await readIfExists(p)) ?? '';
     const r = mergeCodexConfig(cur, scriptPath);
-    if (r.conflict) out.codex = 'conflict';
+    if (r.conflict) codexNotify = 'conflict';
     else if (r.changed) {
       await fs.mkdir(join(homeDir, '.codex'), { recursive: true });
       await atomicWrite(p, r.result);
-      out.codex = 'installed';
-    } else out.codex = 'already';
+      codexNotify = 'installed';
+    } else codexNotify = 'already';
   } catch (e) {
-    out.codex = `error:${String(e)}`;
+    codexNotify = `error:${String(e)}`;
   }
+
+  let codexHooks = 'error:unknown';
+  try {
+    const p = join(homeDir, '.codex', 'hooks.json');
+    const cur = (await readIfExists(p)) ?? '{}';
+    const r = mergeCodexHooksJson(cur, scriptPath);
+    if (r.changed) {
+      await fs.mkdir(join(homeDir, '.codex'), { recursive: true });
+      await atomicWrite(p, r.result);
+      codexHooks = 'installed';
+    } else codexHooks = 'already';
+  } catch (e) {
+    codexHooks = `error:${String(e)}`;
+  }
+
+  if (codexNotify.startsWith('error:')) out.codex = codexNotify;
+  else if (codexHooks.startsWith('error:')) out.codex = codexHooks;
+  else if (codexNotify === 'conflict') out.codex = 'conflict';
+  else if (codexNotify === 'installed' || codexHooks === 'installed') out.codex = 'installed';
+  else out.codex = 'already';
   return out;
 }
 
@@ -255,5 +310,11 @@ export async function removeHooks(homeDir: string, scriptPath: string): Promise<
   if (cur2 !== null) {
     const r = removeCodexNotify(cur2, scriptPath);
     if (r.changed) await atomicWrite(xp, r.result);
+  }
+  const hp = join(homeDir, '.codex', 'hooks.json');
+  const cur3 = await readIfExists(hp);
+  if (cur3 !== null) {
+    const r = removeCodexHooksJson(cur3, scriptPath);
+    if (r.changed) await atomicWrite(hp, r.result);
   }
 }

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
   mergeClaudeSettings, mergeCodexConfig, removeClaudeHooks, removeCodexNotify,
-  installHooks, mergeStatusLine, removeStatusLine,
+  installHooks, mergeStatusLine, removeStatusLine, mergeCodexHooksJson, removeCodexHooksJson,
 } from '../src/hooks/installer';
 
 const SCRIPT = '/Users/x/.vscode/ext/dist/resources/agent-monitor-hook.sh';
@@ -50,6 +50,69 @@ describe('mergeClaudeSettings', () => {
     expect(changed).toBe(false);
     expect(result).toBe(input);
     expect(JSON.parse(result).hooks.PreToolUse[0].hooks[0].command).toBe('echo pair'); // pair-coding hook 보존
+  });
+});
+
+describe('Codex hooks.json', () => {
+  it('타 도구 PermissionRequest 훅을 보존하며 추가', () => {
+    const input = JSON.stringify({
+      hooks: {
+        PermissionRequest: [{ hooks: [{ type: 'command', command: 'other-tool' }] }],
+      },
+      otherSetting: true,
+    });
+    const { changed, result } = mergeCodexHooksJson(input, SCRIPT);
+    expect(changed).toBe(true);
+    const out = JSON.parse(result);
+    expect(out.otherSetting).toBe(true);
+    expect(out.hooks.PermissionRequest[0].hooks[0].command).toBe('other-tool');
+    expect(out.hooks.PermissionRequest[1].hooks[0].command).toBe(`"${SCRIPT}" codex-hook`);
+  });
+
+  it('idempotent — 재실행 시 결과도 그대로 유지', () => {
+    const once = mergeCodexHooksJson('{}', SCRIPT).result;
+    const twice = mergeCodexHooksJson(once, SCRIPT);
+    expect(twice.changed).toBe(false);
+    expect(twice.result).toBe(once);
+  });
+
+  it('빈 문자열 입력을 빈 객체로 취급', () => {
+    const { changed, result } = mergeCodexHooksJson('', SCRIPT);
+    expect(changed).toBe(true);
+    expect(JSON.parse(result).hooks.PermissionRequest[0].hooks[0].command)
+      .toBe(`"${SCRIPT}" codex-hook`);
+  });
+
+  it('scriptPath가 빈 문자열이면 merge/remove 모두 no-op', () => {
+    const input = JSON.stringify({
+      hooks: { PermissionRequest: [{ hooks: [{ type: 'command', command: 'other-tool' }] }] },
+    });
+    expect(mergeCodexHooksJson(input, '')).toEqual({ changed: false, result: input });
+    expect(removeCodexHooksJson(input, '')).toEqual({ changed: false, result: input });
+  });
+
+  it('제거 시 자기 항목만 지우고 타 도구 훅은 보존', () => {
+    const merged = mergeCodexHooksJson(JSON.stringify({
+      hooks: {
+        PermissionRequest: [{
+          hooks: [
+            { type: 'command', command: 'other-tool' },
+            { type: 'command', command: `"${SCRIPT}" codex-hook` },
+          ],
+        }],
+      },
+    }), SCRIPT).result;
+    const { changed, result } = removeCodexHooksJson(merged, SCRIPT);
+    expect(changed).toBe(true);
+    expect(JSON.stringify(JSON.parse(result))).not.toContain(SCRIPT);
+    expect(JSON.stringify(JSON.parse(result))).toContain('other-tool');
+  });
+
+  it('우리 항목이 없으면 제거하지 않음', () => {
+    const input = JSON.stringify({
+      hooks: { PermissionRequest: [{ hooks: [{ type: 'command', command: 'other-tool' }] }] },
+    });
+    expect(removeCodexHooksJson(input, SCRIPT)).toEqual({ changed: false, result: input });
   });
 });
 
@@ -134,6 +197,8 @@ describe('installHooks', () => {
     const r2 = await installHooks(home, SCRIPT);
     expect(r2).toEqual({ claude: 'already', codex: 'already', statusline: 'skipped' });
     expect(readFileSync(join(home, '.claude/settings.json'), 'utf8')).toContain(SCRIPT);
+    const codexHooks = JSON.parse(readFileSync(join(home, '.codex/hooks.json'), 'utf8'));
+    expect(codexHooks.hooks.PermissionRequest[0].hooks[0].command).toBe(`"${SCRIPT}" codex-hook`);
   });
 });
 

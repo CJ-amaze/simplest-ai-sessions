@@ -47,18 +47,41 @@ export function isBusy(pid: number, byPid: Map<number, ProcInfo>): boolean {
   return false;
 }
 
+// claude 데몬 아키텍처(2.1.20x)의 인프라 프로세스 — 세션이 아니므로 카드 대상 아님.
+// (bg 세션의 "진짜" 프로세스는 versions/<semver> 바이너리로 떠서 여기 안 걸리고,
+// 네이티브 바인딩 보강으로 별도 인정된다)
+const CLAUDE_INFRA_ARGS = new Set(['daemon', 'bg-pty-host', 'bg-spare', '--bg-pty-host', '--bg-spare']);
+
 export function detectAgent(command: string): AgentKind | null {
   const tokens = command.split(/\s+/);
   // argv[0], 또는 node/bun 래퍼면 argv[1]의 basename 검사
   const candidates = [tokens[0]];
   const first = tokens[0]?.split('/').pop();
   if ((first === 'node' || first === 'bun') && tokens[1]) candidates.push(tokens[1]);
-  for (const c of candidates) {
-    const base = c?.split('/').pop();
-    if (base === 'claude') return 'claude';
+  for (let i = 0; i < candidates.length; i++) {
+    const base = candidates[i]?.split('/').pop();
+    if (base === 'claude') {
+      const arg = tokens[i + 1];
+      return arg !== undefined && CLAUDE_INFRA_ARGS.has(arg) ? null : 'claude';
+    }
     if (base === 'codex') return 'codex';
   }
   return null;
+}
+
+const TRANSCRIPT_UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl/;
+
+/**
+ * 데몬이 스폰한 bg 서브에이전트의 부모 세션 추출 — `--fork-session --resume <부모 transcript>`
+ * 커맨드라인이 유일한 신호다 (ppid=1이라 프로세스 트리로는 추적 불가).
+ * ps 출력엔 따옴표가 없어 공백 경로는 토큰 분리로 못 다룸 → --resume 이후~다음 플래그
+ * 사이 구간에서 `<uuid>.jsonl`을 직접 찾는다.
+ */
+export function parseForkParentSessionId(command: string): string | null {
+  if (!/(^|\s)--fork-session(\s|$)/.test(command)) return null;
+  const m = command.match(/(^|\s)--resume\s+(.*?)(?=\s--|$)/);
+  const uuid = m?.[2].match(TRANSCRIPT_UUID_RE);
+  return uuid ? uuid[1] : null;
 }
 
 export function ancestorChain(pid: number, byPid: Map<number, ProcInfo>): number[] {
@@ -90,8 +113,8 @@ export interface ReconcileInput {
   sessions: ReadonlyArray<ReconcileSession>;
   /** 사전 조회된 agent 프로세스 cwd (없으면 휴리스틱 매칭 불가) */
   cwdByPid: Map<number, string | undefined>;
-  /** Claude Code 자체 선언 바인딩 (~/.claude/sessions/<pid>.json) — 최우선 신호 */
-  nativeBindings?: Map<number, { sessionId: string; status?: 'busy' | 'idle' }>;
+  /** Claude Code 자체 선언 바인딩 (~/.claude/sessions/<pid>.json) — 최우선 신호. name은 표시용 */
+  nativeBindings?: Map<number, { sessionId: string; status?: 'busy' | 'idle'; name?: string }>;
   now: number;
 }
 
@@ -110,6 +133,7 @@ export interface ReconcileResult {
   orphanProcs: Array<{
     agent: AgentKind; pid: number; terminalName?: string; shellPid?: number;
     parentKey: string | null;
+    topic?: string; // 네이티브 바인딩의 세션 이름 — 있으면 "Waiting for first query…" 대신 표시
   }>;
 }
 
@@ -129,6 +153,33 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
     const parent = byPid.get(p.ppid);
     return !(parent && detectAgent(parent.command) === detectAgent(p.command));
   });
+  // 바인딩 보강: 네이티브 바인딩의 pid가 살아있는데 커맨드 모양으로는 미검출인 프로세스
+  // (데몬이 versions/<semver> 바이너리로 스폰한 bg 세션)를 claude agent로 인정.
+  // PID 재사용 방어: 커맨드라인에 바인딩의 sessionId가 실제로 있어야 함 — 바인딩 파일이
+  // stale로 남고 pid가 무관한 프로세스에 재할당된 경우를 걸러낸다.
+  const agentOverride = new Map<number, AgentKind>();
+  // 커맨드라인에 바인딩 sessionId가 실제로 박힌 프로세스는 소속 세션이 "증명"된 것 —
+  // pass 0(등록된 경우) 외 어떤 세션도 이 프로세스를 클레임할 수 없다. 바인딩 세션이
+  // 아직 미등록일 때 같은 pid를 기록한 옛 세션이 pass 1/2로 가로채는 것(유령 부활 +
+  // 플레이스홀더 누락)을 막는다.
+  const boundKeyByPid = new Map<number, string>();
+  if (nativeBindings) {
+    for (const [pid, nat] of nativeBindings) {
+      const proc = byPid.get(pid);
+      if (!proc || !proc.command.includes(nat.sessionId)) continue;
+      boundKeyByPid.set(pid, `claude:${nat.sessionId}`);
+      if (!agents.some((p) => p.pid === pid) && detectAgent(proc.command) === null) {
+        agentOverride.set(pid, 'claude');
+        agents.push(proc);
+      }
+    }
+  }
+  const agentOf = (p: ProcInfo): AgentKind | null =>
+    agentOverride.get(p.pid) ?? detectAgent(p.command);
+  const claimAllowed = (proc: ProcInfo, key: string): boolean => {
+    const bound = boundKeyByPid.get(proc.pid);
+    return bound === undefined || bound === key;
+  };
   const claimedSessions = new Set<string>();
   const sessionByProc = new Map<number, string>();
   const claims: ReconcileResult['claims'] = [];
@@ -156,7 +207,7 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
   if (nativeBindings) {
     for (const proc of agents) {
       if (sessionByProc.has(proc.pid)) continue;
-      const agent = detectAgent(proc.command);
+      const agent = agentOf(proc);
       if (!agent) continue;
       const nat = nativeBindings.get(proc.pid);
       if (!nat) continue;
@@ -171,10 +222,10 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
   for (const field of ['hookPid', 'pid'] as const) {
     for (const proc of agents) {
       if (sessionByProc.has(proc.pid)) continue;
-      const agent = detectAgent(proc.command);
+      const agent = agentOf(proc);
       if (!agent) continue;
       const match = byAgentRecent(agent).find(
-        (s) => s[field] === proc.pid && !claimedSessions.has(s.key),
+        (s) => s[field] === proc.pid && !claimedSessions.has(s.key) && claimAllowed(proc, s.key),
       );
       if (match) claim(proc, match, 'exact');
     }
@@ -184,20 +235,22 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
   // exited로 기록된 세션은 제외 (유령 부활은 exact 신호만 가능)
   for (const proc of agents) {
     if (sessionByProc.has(proc.pid)) continue;
-    const agent = detectAgent(proc.command);
+    const agent = agentOf(proc);
     if (!agent) continue;
     const cwd = cwdByPid.get(proc.pid);
     if (cwd === undefined) continue;
     const match = byAgentRecent(agent).find(
-      (s) => (s.launchCwd ?? s.cwd) === cwd && s.processAlive !== false && !claimedSessions.has(s.key),
+      (s) => (s.launchCwd ?? s.cwd) === cwd && s.processAlive !== false &&
+        !claimedSessions.has(s.key) && claimAllowed(proc, s.key),
     );
     if (match) claim(proc, match, 'heuristic');
   }
   // pass 4: singleton pairing — cwd가 안 맞아도(codex exec --cd는 chdir하지 않음) 같은 agent의
   // 미클레임 프로세스와 "활발히 기록 중"인 미클레임 세션이 정확히 1:1이면 짝지음
   for (const kind of ['claude', 'codex'] as const) {
+    // 소속이 증명된(bound) 프로세스는 임의 세션과 짝지을 수 없음 — singleton 후보에서 제외
     const procs = agents.filter(
-      (p) => detectAgent(p.command) === kind && !sessionByProc.has(p.pid),
+      (p) => agentOf(p) === kind && !sessionByProc.has(p.pid) && !boundKeyByPid.has(p.pid),
     );
     if (procs.length !== 1) continue;
     // pid 이력이 있는 세션 제외 — 방금 죽은 세션이 새 프로세스를 선점(유령 부활)하지 않도록.
@@ -220,31 +273,40 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
   }
 
   // 서브에이전트 연결: 조상 체인에서 "세션을 클레임한" 첫 프로세스가 부모
-  // (클레임 없는 래퍼·중간 셸은 건너뜀 — node 래퍼가 진짜 부모 claude를 가리는 것 방지)
-  const parentOf = (procPid: number, selfKey?: string): string | null => {
-    for (const anc of ancestorChain(procPid, byPid)) {
+  // (클레임 없는 래퍼·중간 셸은 건너뜀 — node 래퍼가 진짜 부모 claude를 가리는 것 방지).
+  // 조상 체인이 끊긴 데몬 스폰 bg 세션(ppid=1)은 --fork-session --resume 커맨드라인으로 추적.
+  const sessionKeys = new Set(sessions.map((s) => s.key));
+  const parentOf = (proc: ProcInfo, selfKey?: string): string | null => {
+    for (const anc of ancestorChain(proc.pid, byPid)) {
       const owner = sessionByProc.get(anc);
       if (owner !== undefined && owner !== selfKey) return owner;
+    }
+    const forkParent = parseForkParentSessionId(proc.command);
+    if (forkParent !== null) {
+      const key = `claude:${forkParent}`;
+      if (key !== selfKey && sessionKeys.has(key)) return key;
     }
     return null;
   };
   const parentLinks: ReconcileResult['parentLinks'] = [];
   for (const [procPid, key] of sessionByProc) {
-    parentLinks.push({ key, parentKey: parentOf(procPid, key) });
+    const proc = byPid.get(procPid);
+    parentLinks.push({ key, parentKey: proc ? parentOf(proc, key) : null });
   }
 
   // 세션 파일이 아직 없는 살아있는 agent 프로세스 (첫 쿼리 전 codex 등) — 플레이스홀더 대상
   const orphanProcs: ReconcileResult['orphanProcs'] = [];
   for (const proc of agents) {
     if (sessionByProc.has(proc.pid)) continue;
-    const agent = detectAgent(proc.command);
+    const agent = agentOf(proc);
     if (!agent) continue;
     const shellPid = ancestorChain(proc.pid, byPid).find((p) => shellPids.has(p));
     orphanProcs.push({
       agent, pid: proc.pid,
       terminalName: shellPid !== undefined ? shellPids.get(shellPid) : undefined,
       shellPid,
-      parentKey: parentOf(proc.pid),
+      parentKey: parentOf(proc),
+      topic: nativeBindings?.get(proc.pid)?.name,
     });
   }
 

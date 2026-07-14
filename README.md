@@ -44,7 +44,9 @@ npm run package        # → simplest-ai-sessions-<version>.vsix
 code --install-extension simplest-ai-sessions-*.vsix
 ```
 
-On first run it offers to install **hooks** (a Claude Code `Stop`/`Notification` hook and a codex `notify` entry) so approval-waiting and turn boundaries are detected precisely, plus an optional **statusLine** entry that lets cards show each Claude session's effort level (only added if you don't already have a statusLine). Existing settings are preserved and backed up (`*.agent-monitor.bak`); `AI Sessions: Remove hooks` cleanly removes only its own entries. Without hooks it still works in a degraded mode (30-second activity window, no approval detection for Claude).
+On first run it offers to install **hooks** (a Claude Code `Stop`/`Notification` hook, a codex `notify` entry, and a codex `PermissionRequest` hook in `~/.codex/hooks.json`) so approval-waiting and turn boundaries are detected precisely, plus an optional **statusLine** entry that lets cards show each Claude session's effort level (only added if you don't already have a statusLine). Existing settings are preserved and backed up (`*.agent-monitor.bak`); `AI Sessions: Remove hooks` cleanly removes only its own entries. Without hooks it still works in a degraded mode (30-second activity window, no approval detection for Claude).
+
+> **codex approval detection requires a one-time trust step**: codex skips non-managed hooks until you review them — open codex and run `/hooks` once to trust the new `PermissionRequest` hook. (codex ≥ 0.144 no longer writes approval requests to the rollout file, so the hook is the only reliable signal.)
 
 ## Requirements
 

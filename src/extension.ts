@@ -209,7 +209,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void context.globalState.update('hooksPrompted', true);
     void vscode.window
       .showInformationMessage(
-        'AI Sessions: to detect approval-waiting accurately, Claude Code hooks / codex notify need to be configured. Install now? (existing settings preserved, backup created)',
+        'AI Sessions: to detect approval-waiting accurately, Claude Code hooks / codex hooks+notify need to be configured. Install now? (existing settings preserved, backup created)',
         'Install', 'Later',
       )
       .then((pick) => {
@@ -225,7 +225,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const r = await installHooks(os.homedir(), script, statusScript);
     await refreshTurnTracking(store, script);
     void vscode.window.showInformationMessage(
-      `AI Sessions hooks — claude: ${r.claude}, codex: ${r.codex}, statusline: ${r.statusline}`,
+      `AI Sessions hooks — claude: ${r.claude}, codex: ${r.codex}, statusline: ${r.statusline}. ` +
+      'codex approval detection: run /hooks inside codex once to trust the new PermissionRequest hook.',
     );
   }
 }
@@ -258,8 +259,8 @@ async function refreshTurnTracking(store: StateStore, scriptPath: string): Promi
  * Claude Code가 직접 기록하는 세션 상태 파일 (~/.claude/sessions/<pid>.json, v2.1.206+)
  * — pid ↔ sessionId 정확 바인딩. 존재하면 매핑 추측이 전혀 필요 없다.
  */
-async function readNativeBindings(): Promise<Map<number, { sessionId: string; status?: 'busy' | 'idle' }>> {
-  const map = new Map<number, { sessionId: string; status?: 'busy' | 'idle' }>();
+async function readNativeBindings(): Promise<Map<number, { sessionId: string; status?: 'busy' | 'idle'; name?: string }>> {
+  const map = new Map<number, { sessionId: string; status?: 'busy' | 'idle'; name?: string }>();
   const dir = path.join(os.homedir(), '.claude', 'sessions');
   let entries: string[] = [];
   try {
@@ -271,12 +272,13 @@ async function readNativeBindings(): Promise<Map<number, { sessionId: string; st
     if (!name.endsWith('.json')) continue;
     try {
       const d = JSON.parse(await fs.promises.readFile(path.join(dir, name), 'utf8')) as {
-        pid?: number; sessionId?: string; status?: string;
+        pid?: number; sessionId?: string; status?: string; name?: string;
       };
       if (typeof d.pid === 'number' && typeof d.sessionId === 'string') {
         map.set(d.pid, {
           sessionId: d.sessionId,
           status: d.status === 'busy' || d.status === 'idle' ? d.status : undefined,
+          name: typeof d.name === 'string' && d.name.length > 0 ? d.name : undefined,
         });
       }
     } catch {

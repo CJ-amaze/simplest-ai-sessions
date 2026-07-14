@@ -149,6 +149,7 @@ export class StateStore {
     orphans: Array<{
       agent: AgentKind; pid: number; terminalName?: string; shellPid?: number;
       parentKey: string | null;
+      topic?: string; // 네이티브 바인딩의 세션 이름 (bg 서브에이전트 등)
     }>,
     now: number = Date.now(),
   ): void {
@@ -177,6 +178,10 @@ export class StateStore {
       s.stoppedAt = now;      // 실작업 증거가 없는 한 항상 idle (running 오판 방지)
       if (s.terminalName !== o.terminalName && o.terminalName !== undefined) {
         s.terminalName = o.terminalName;
+        changed = true;
+      }
+      if (o.topic !== undefined && s.topic !== o.topic) {
+        s.topic = o.topic;
         changed = true;
       }
       if (o.shellPid !== undefined) s.shellPid = o.shellPid;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ancestorChain, detectAgent, PAIRING_FRESH_MS, parsePsOutput,
+  ancestorChain, detectAgent, PAIRING_FRESH_MS, parseForkParentSessionId, parsePsOutput,
   REGISTER_GRACE_MS, reconcileSessions,
 } from '../src/mapper';
 import type { ReconcileInput } from '../src/mapper';
@@ -34,6 +34,36 @@ describe('detectAgent', () => {
     expect(detectAgent('/bin/zsh -il')).toBeNull();
     expect(detectAgent('vi /tmp/claude-notes.md')).toBeNull();
     expect(detectAgent('node /Users/dev/.claude/foo.js')).toBeNull();
+  });
+  it('claude 데몬 인프라(daemon/bg-pty-host/bg-spare)는 세션 아님 — null (2.1.20x 실측 형태)', () => {
+    expect(detectAgent('/Users/cj/.local/bin/claude daemon run --json-path /Users/cj/.claude/daemon.json')).toBeNull();
+    expect(detectAgent('/Users/cj/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude --bg-pty-host /tmp/cc-daemon-501/d/pty/x.sock 227 136 -- /Users/cj/.local/share/claude/versions/2.1.207 --session-id x')).toBeNull();
+    expect(detectAgent('claude bg-pty-host --bg-pty-host /tmp/spare.pty.sock 200 50 -- claude --bg-spare')).toBeNull();
+    expect(detectAgent('claude bg-spare --bg-spare /tmp/spare.claim.sock')).toBeNull();
+  });
+  it('일반 플래그가 붙은 claude는 여전히 검출 (인프라 제외의 회귀 방지)', () => {
+    expect(detectAgent('claude --dangerously-skip-permissions')).toBe('claude');
+    expect(detectAgent('claude -p 하위작업 --allowed-tools Bash')).toBe('claude');
+  });
+});
+
+describe('parseForkParentSessionId', () => {
+  const PARENT = 'a5db5c28-c147-44dc-92bf-b08a9d1a2040';
+  const BG = `/Users/cj/.local/share/claude/versions/2.1.207 --session-id 8995252a-14c4-4568-bc20-37fed1e8625a --fork-session --resume /Users/cj/.claude/projects/-Users-cj-Desktop-CJI/${PARENT}.jsonl --allowed-tools mcp__x__y --permission-mode bypassPermissions`;
+
+  it('bg 서브에이전트 실측 커맨드라인에서 부모 sessionId 추출', () => {
+    expect(parseForkParentSessionId(BG)).toBe(PARENT);
+  });
+  it('--fork-session 없는 일반 resume은 부모 아님 (사용자가 이어가는 같은 세션)', () => {
+    expect(parseForkParentSessionId(`claude --resume /p/${PARENT}.jsonl`)).toBeNull();
+  });
+  it('--resume 없으면 null', () => {
+    expect(parseForkParentSessionId('claude --fork-session')).toBeNull();
+  });
+  it('공백 포함 경로 — ps 출력엔 따옴표가 없어도 <uuid>.jsonl로 추출', () => {
+    expect(parseForkParentSessionId(
+      `claude --fork-session --resume /Users/cj/My Projects/-x/${PARENT}.jsonl --verbose`,
+    )).toBe(PARENT);
   });
 });
 
@@ -333,6 +363,69 @@ describe('reconcileSessions', () => {
     expect(r.orphanProcs).toEqual([
       { agent: 'codex', pid: 800, terminalName: undefined, shellPid: undefined, parentKey: 'claude:parent' },
     ]);
+  });
+
+  // ── 데몬 스폰 bg 서브에이전트 (Claude Code 2.1.20x) ─────────────────
+  const BG_SID = '8995252a-14c4-4568-bc20-37fed1e8625a';
+  const PARENT_SID = 'a5db5c28-c147-44dc-92bf-b08a9d1a2040';
+  const bgCmd = `/Users/cj/.local/share/claude/versions/2.1.207 --session-id ${BG_SID} --fork-session --resume /Users/cj/.claude/projects/-x/${PARENT_SID}.jsonl --permission-mode bypassPermissions`;
+
+  it('바인딩 보강: versions/<semver> 바이너리 bg 세션도 네이티브 바인딩으로 클레임 + fork 부모 연결', () => {
+    const parentProc = { pid: 16402, ppid: 600, pcpu: 0, command: 'claude' };
+    const bgProc = { pid: 24577, ppid: 1, pcpu: 0, command: bgCmd }; // 데몬 스폰 — ppid=1
+    const r = reconcileSessions(makeInput({
+      agents: [parentProc], // 스냅샷의 detectAgent는 bgProc를 못 봄 — byPid에만 존재
+      byPid: new Map([[16402, parentProc], [24577, bgProc]]),
+      nativeBindings: new Map([[24577, { sessionId: BG_SID, status: 'idle' as const }]]),
+      sessions: [
+        sess(`claude:${PARENT_SID}`, { pid: 16402 }),
+        sess(`claude:${BG_SID}`),
+      ],
+    }));
+    const byKey = Object.fromEntries(r.claims.map((c) => [c.key, c]));
+    expect(byKey[`claude:${BG_SID}`]).toMatchObject({ pid: 24577, mapping: 'exact' });
+    const links = Object.fromEntries(r.parentLinks.map((l) => [l.key, l.parentKey]));
+    expect(links[`claude:${BG_SID}`]).toBe(`claude:${PARENT_SID}`); // ppid=1이어도 fork 커맨드라인으로 부모 연결
+    expect(r.exited).toEqual([]);
+  });
+
+  it('바인딩 보강 PID 재사용 방어: 커맨드라인에 바인딩 sessionId가 없으면 보강하지 않음', () => {
+    const stranger = { pid: 24577, ppid: 1, pcpu: 0, command: '/usr/bin/some-unrelated-daemon' };
+    const r = reconcileSessions(makeInput({
+      byPid: new Map([[24577, stranger]]),
+      nativeBindings: new Map([[24577, { sessionId: BG_SID }]]),
+      sessions: [sess(`claude:${BG_SID}`)],
+    }));
+    expect(r.claims).toEqual([]);
+    expect(r.exited).toEqual([`claude:${BG_SID}`]); // 무관 프로세스가 세션을 살려두지 않음
+  });
+
+  it('소속 증명(bound) 프로세스는 바인딩 세션 외 클레임 불가 — 미등록 bg 세션 + 같은 pid를 기록한 옛 세션', () => {
+    const bgProc = { pid: 24577, ppid: 1, pcpu: 0, command: bgCmd };
+    const r = reconcileSessions(makeInput({
+      byPid: new Map([[24577, bgProc]]),
+      nativeBindings: new Map([[24577, { sessionId: BG_SID, name: 'bg 작업' }]]),
+      // bg 세션은 미등록. PID 재사용으로 24577을 기록해둔 옛 세션만 존재
+      sessions: [sess('claude:stale-old', { pid: 24577, lastActivityAt: T - 30_000 })],
+    }));
+    expect(r.claims).toEqual([]); // 옛 세션이 bg 프로세스를 가로채지 않음
+    expect(r.exited).toEqual(['claude:stale-old']);
+    expect(r.orphanProcs).toMatchObject([{ agent: 'claude', pid: 24577, topic: 'bg 작업' }]);
+  });
+
+  it('bg 세션이 스토어 미등록(transcript 오래됨)이면 플레이스홀더 — 부모 연결 + 바인딩 이름 표시', () => {
+    const parentProc = { pid: 16402, ppid: 600, pcpu: 0, command: 'claude' };
+    const bgProc = { pid: 24577, ppid: 1, pcpu: 0, command: bgCmd };
+    const r = reconcileSessions(makeInput({
+      agents: [parentProc],
+      byPid: new Map([[16402, parentProc], [24577, bgProc]]),
+      nativeBindings: new Map([[24577, { sessionId: BG_SID, name: '관세 환급 관련 논의' }]]),
+      sessions: [sess(`claude:${PARENT_SID}`, { pid: 16402 })], // bg 세션은 미등록
+    }));
+    expect(r.orphanProcs).toEqual([{
+      agent: 'claude', pid: 24577, terminalName: undefined, shellPid: undefined,
+      parentKey: `claude:${PARENT_SID}`, topic: '관세 환급 관련 논의',
+    }]);
   });
 
   it('shellPid: 조상 체인에서 VS Code 터미널 shell 식별 + 이름 전달', () => {

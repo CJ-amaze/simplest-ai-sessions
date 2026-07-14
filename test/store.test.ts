@@ -229,6 +229,15 @@ describe('StateStore', () => {
     expect(s.list(T + 6000)[0].children).toBeUndefined();
   });
 
+  it('플레이스홀더 topic: 바인딩 세션 이름이 있으면 기본 문구 대신 표시, 없으면 유지', () => {
+    const s = new StateStore();
+    s.syncPlaceholders([{ agent: 'claude', pid: 800, parentKey: null }], T);
+    expect(s.list(T + 1000)[0].topic).toBe('Waiting for first query…');
+    // 다음 pass에서 바인딩 이름이 도착하면 갱신
+    s.syncPlaceholders([{ agent: 'claude', pid: 800, parentKey: null, topic: '관세 환급 관련 논의' }], T + 100);
+    expect(s.list(T + 1000)[0].topic).toBe('관세 환급 관련 논의');
+  });
+
   it('플레이스홀더는 all()에 포함되지 않음 (reconcile 클레임 대상 아님) — 단 find()로는 조회 가능 (터미널 포커스)', () => {
     const s = new StateStore();
     s.syncPlaceholders([{ agent: 'codex', pid: 800, shellPid: 600, parentKey: null }], T);
