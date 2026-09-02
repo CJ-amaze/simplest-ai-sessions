@@ -15,7 +15,7 @@ describe('ClaudeAdapter', () => {
     const f = loadFixture();
     expect(f.model).toBe('claude-fable-5');
     expect(f.mode).toBe('bypassPermissions');
-    expect(f.topic).toBe('모니터 툴 설계');           // aiTitle 우선
+    expect(f.topic).toBe('진행하자');               // 최신 실프롬프트 우선 (2026-09-02 — aiTitle 은 폴백)
     expect(f.cwd).toBe('/Users/dev/Desktop/CJI');
     expect(f.gitBranch).toBe('main');
     // 누적 = (10+100+5000+200) + (20+300+6000+100)
@@ -130,5 +130,50 @@ describe('ClaudeAdapter', () => {
         expect(acc.lastPromptAt).toBeUndefined();
       }
     }
+  });
+});
+
+
+describe('세션요약 = 마지막 질의응답 (2026-09-02)', () => {
+  it('실프롬프트가 aiTitle 을 이기고, 새 프롬프트가 이전 답변을 지운다', () => {
+    const acc = newClaudeAccum();
+    applyClaudeLine(acc, JSON.stringify({ type: 'ai-title', aiTitle: '초기 제목' }));
+    applyClaudeLine(acc, JSON.stringify({
+      type: 'assistant', timestamp: '2026-09-02T00:00:01Z',
+      message: { content: [{ type: 'text', text: '첫 답변입니다' }] },
+    }));
+    applyClaudeLine(acc, JSON.stringify({
+      type: 'user', timestamp: '2026-09-02T00:00:02Z', message: { content: '두번째 질문' },
+    }));
+    const f = claudeFields(acc);
+    expect(f.topic).toBe('두번째 질문');
+    expect(f.lastReply).toBe('');                 // 클리어 — 옛 답변이 새 질문과 짝지지 않게
+    applyClaudeLine(acc, JSON.stringify({
+      type: 'assistant', timestamp: '2026-09-02T00:00:03Z',
+      message: { content: [{ type: 'thinking', thinking: 'x' }, { type: 'text', text: '  두번째 답변' }] },
+    }));
+    expect(claudeFields(acc).lastReply).toBe('두번째 답변');
+  });
+
+  it('last-prompt 레코드의 노이즈(커맨드 에코·중단·공백)는 요약을 덮지 않는다', () => {
+    const acc = newClaudeAccum();
+    applyClaudeLine(acc, JSON.stringify({ type: 'last-prompt', lastPrompt: '진짜 질문' }));
+    applyClaudeLine(acc, JSON.stringify({ type: 'last-prompt', lastPrompt: '<command-name>/mcp</command-name>' }));
+    applyClaudeLine(acc, JSON.stringify({ type: 'last-prompt', lastPrompt: '[Request interrupted by user]' }));
+    applyClaudeLine(acc, JSON.stringify({ type: 'last-prompt', lastPrompt: '   ' }));
+    expect(claudeFields(acc).topic).toBe('진짜 질문');
+  });
+
+  it('tool_use 만 있는 assistant 는 답변을 덮지 않는다', () => {
+    const acc = newClaudeAccum();
+    applyClaudeLine(acc, JSON.stringify({
+      type: 'assistant', timestamp: '2026-09-02T00:00:01Z',
+      message: { content: [{ type: 'text', text: '답변 유지' }] },
+    }));
+    applyClaudeLine(acc, JSON.stringify({
+      type: 'assistant', timestamp: '2026-09-02T00:00:02Z',
+      message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash' }] },
+    }));
+    expect(claudeFields(acc).lastReply).toBe('답변 유지');
   });
 });

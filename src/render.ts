@@ -28,19 +28,25 @@ export interface PlainTerminal { name?: string; shellPid: number }
 
 export function renderCards(
   sessions: SessionView[], activeShellPid?: number, terminals: PlainTerminal[] = [],
+  termNo?: Map<number, number>,
 ): string {
+  const no = (pid?: number): string => {
+    const n = pid !== undefined ? termNo?.get(pid) : undefined;
+    return n !== undefined ? `<span class="termno">#${n}</span> ` : '';
+  };
   const termRows = terminals
     .map((t) =>
-      `<div class="term${t.shellPid === activeShellPid ? ' active' : ''}" data-shellpid="${t.shellPid}">▷ ${esc(t.name ?? 'terminal')} <span class="hint">— run claude or codex</span></div>`,
+      `<div class="term${t.shellPid === activeShellPid ? ' active' : ''}" data-shellpid="${t.shellPid}">${no(t.shellPid)}▷ ${esc(t.name ?? 'terminal')} <span class="hint">— run claude or codex</span></div>`,
     )
     .join('\n');
   if (sessions.length === 0 && terminals.length === 0) {
     return '<div class="empty">No AI sessions detected<br/>Run claude or codex in a terminal</div>';
   }
-  return renderSessionCards(sessions, activeShellPid) + (termRows ? `\n${termRows}` : '');
+  return renderSessionCards(sessions, activeShellPid, no) + (termRows ? `\n${termRows}` : '');
 }
 
-function renderSessionCards(sessions: SessionView[], activeShellPid?: number): string {
+function renderSessionCards(sessions: SessionView[], activeShellPid?: number,
+  no: (pid?: number) => string = () => ''): string {
   return sessions
     .map((s) => {
       const pct =
@@ -58,10 +64,10 @@ function renderSessionCards(sessions: SessionView[], activeShellPid?: number): s
       // 주제는 한 줄만: ai-title(topic) 우선, 없으면 터미널 이름 (같은 내용 중복 표시 방지)
       const title = s.topic ?? s.terminalName ?? (s.mapping === 'none' ? 'external terminal' : '');
       return `<div class="card ${s.status}${s.status === 'exited' ? ' dim' : ''}${isActive ? ' active' : ''}" data-key="${esc(s.key)}">
-  <div class="row1"><span class="status">${STATUS_LABEL[s.status]}</span>
+  <div class="row1">${no(s.shellPid)}<span class="status">${STATUS_LABEL[s.status]}</span>
     <span class="model">${esc(s.model ?? s.agent)}</span></div>
   <div class="row2">${esc([s.effort, s.mode].filter(Boolean).join('·'))}${s.pid !== undefined ? ` · pid ${s.pid}` : ''}</div>
-  <div class="topic">${esc(title)}</div>
+  <div class="topic">${esc(title)}</div>${s.lastReply ? `\n  <div class="reply">↳ ${esc(s.lastReply)}</div>` : ''}
   <div class="row3">${esc(meta2)}</div>
   <div class="row4">${fmtTokens(s.totalTokens)} tok${pct !== undefined ? ` · <span class="bar"><span style="width:${pct}%"></span></span> ${pct}%` : ''} · ${cost}</div>${children ? `\n${children}` : ''}
 </div>`;
@@ -84,6 +90,9 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); 
 #newTerm:hover { opacity: 1; background: var(--vscode-list-hoverBackground);
   border-color: var(--vscode-focusBorder); border-style: solid; }
 .empty { opacity: 0.6; text-align: center; padding: 24px 8px; line-height: 1.7; }
+.termno { opacity: 0.55; font-weight: 600; font-variant-numeric: tabular-nums; }
+.reply { opacity: 0.6; font-size: 0.85em; margin-top: 1px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
 .card { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px 10px;
   margin-bottom: 8px; cursor: pointer; background: var(--vscode-sideBar-background); }
 .card:hover { background: var(--vscode-list-hoverBackground); }

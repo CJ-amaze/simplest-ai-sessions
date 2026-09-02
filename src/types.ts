@@ -11,6 +11,7 @@ export interface SessionFields {
   mode?: string;            // claude: permissionMode / codex: "approval·sandbox"
   effort?: string;          // 모델 effort — codex: rollout turn_context, claude: statusLine 연동
   topic?: string;
+  lastReply?: string;       // 마지막 어시스턴트 답변 한 줄 — '' = 새 질문이 이전 답변을 지운 상태
   totalTokens?: number;     // 세션 누적
   contextTokens?: number;   // 마지막 turn 컨텍스트 점유
   contextWindow?: number;   // codex는 rollout에서, claude는 models 테이블에서
@@ -35,6 +36,7 @@ export interface SessionState extends Required<Pick<SessionFields, 'lastActivity
   mode?: string;
   effort?: string;
   topic?: string;
+  lastReply?: string;
   totalTokens: number;
   contextTokens: number;
   contextWindow?: number;

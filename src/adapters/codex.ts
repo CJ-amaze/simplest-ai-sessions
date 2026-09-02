@@ -10,6 +10,7 @@ export interface CodexAccum {
   cwd?: string;
   launchCwd?: string;
   lastUserMessage?: string;
+  lastReply?: string;
   totalTokens: number;
   contextTokens: number;
   contextWindow?: number;
@@ -55,8 +56,17 @@ export function applyCodexLine(acc: CodexAccum, line: string): boolean {
     const pt = p.type;
     // 모든 event_msg는 런타임 이벤트 = 실작업 증거 (session_meta/turn_context 같은 설정 기록과 구분)
     if (!Number.isNaN(ts)) { acc.lastWorkAt = ts; changed = true; }
+    // 완전 독립문 — 아래 else-if 체인(완료시각의 task_complete 분기 포함)과 절대
+    // 엮이면 안 된다. 체인 중간에 끼우면 어느 쪽이든 한 분기를 가로챈다.
+    if (pt === 'task_complete' && typeof p.last_agent_message === 'string'
+        && p.last_agent_message.trim() !== '') {
+      // codex 가 스스로 기록하는 "마지막 답변" — commentary 가 아닌 최종 응답이다
+      acc.lastReply = p.last_agent_message;
+      changed = true;
+    }
     if (pt === 'user_message' && typeof p.message === 'string') {
       acc.lastUserMessage = p.message;
+      acc.lastReply = '';   // 새 질문이 이전 답변을 지운다 — 옛 답변과 짝지어 보이지 않게
       changed = true;
     } else if (pt === 'token_count') {
       const info = (p.info ?? p) as Record<string, unknown>;
@@ -93,6 +103,8 @@ export function codexFields(acc: CodexAccum): SessionFields {
     mode: [acc.approvalPolicy, acc.sandbox].filter(Boolean).join('·') || undefined,
     effort: acc.effort,
     topic: truncate(acc.lastUserMessage, TOPIC_MAX),
+    lastReply: acc.lastReply === undefined ? undefined
+      : (truncate(acc.lastReply, TOPIC_MAX) ?? ''),
     cwd: acc.cwd,
     launchCwd: acc.launchCwd,
     totalTokens: acc.totalTokens,

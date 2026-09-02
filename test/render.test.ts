@@ -103,3 +103,23 @@ describe('renderCards', () => {
     expect(only).toContain('data-shellpid="800"');
   });
 });
+
+
+describe('터미널 번호·답변 줄 (2026-09-02)', () => {
+  it('termNo 맵이 카드와 터미널 행에 #n 배지를 붙인다', () => {
+    const html = renderCards(
+      [view({ shellPid: 111 })], undefined,
+      [{ name: 'zsh', shellPid: 222 }],
+      new Map([[111, 1], [222, 2]]),
+    );
+    expect(html).toContain('<span class="termno">#1</span>');
+    expect(html).toContain('<span class="termno">#2</span> ▷ zsh');
+  });
+
+  it('lastReply 가 있으면 ↳ 줄, 빈 문자열이면 없음 + 이스케이프', () => {
+    const w = renderCards([view({ lastReply: '<b>답변</b>' })], undefined, []);
+    expect(w).toContain('↳ &lt;b&gt;답변&lt;/b&gt;');
+    const wo = renderCards([view({ lastReply: '' })], undefined, []);
+    expect(wo).not.toContain('↳');
+  });
+});

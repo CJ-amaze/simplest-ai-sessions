@@ -8,6 +8,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private activeShellPid?: number;
   private terminals: PlainTerminal[] = [];
+  // 터미널 번호: shellPid 최초 등장 순서로 부여, 창이 사는 동안 고정.
+  // 사라진 pid 는 다음 렌더에서 폐기한다 — OS 의 pid 재사용이 옛 번호를
+  // 물려주지 않게 (codex 리뷰). 리로드 시 1부터 다시 시작(허용).
+  private termNo = new Map<number, number>();
+  private termNoNext = 1;
 
   constructor(
     private store: StateStore,
@@ -48,7 +53,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   refresh(): void {
     if (!this.view) return;
     const views = this.store.list(Date.now());
-    void this.view.webview.postMessage({ html: renderCards(views, this.activeShellPid, this.terminals) });
+    // 번호 배정/폐기 — 현재 보이는 shellPid(세션 카드 + 일반 터미널 행)만 살린다
+    const alive = new Set<number>();
+    for (const v of views) if (v.shellPid !== undefined) alive.add(v.shellPid);
+    for (const t of this.terminals) alive.add(t.shellPid);
+    for (const pid of alive) {
+      if (!this.termNo.has(pid)) this.termNo.set(pid, this.termNoNext++);
+    }
+    for (const pid of [...this.termNo.keys()]) {
+      if (!alive.has(pid)) this.termNo.delete(pid);
+    }
+    void this.view.webview.postMessage({
+      html: renderCards(views, this.activeShellPid, this.terminals, this.termNo),
+    });
     // 서브에이전트(children)의 승인대기도 뱃지에 포함
     const flat = views.flatMap((v) => [v, ...(v.children ?? [])]);
     const approvals = flat.filter((v) => v.status === 'approval').length;

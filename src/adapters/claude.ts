@@ -9,6 +9,7 @@ export interface ClaudeAccum {
   sessionMode?: string;     // 세션 모드 라인(type:"mode") — normal/ultracode 등
   aiTitle?: string;
   lastPrompt?: string;
+  lastReply?: string;
   cwd?: string;
   launchCwd?: string;
   gitBranch?: string;
@@ -51,8 +52,14 @@ export function applyClaudeLine(acc: ClaudeAccum, line: string): boolean {
     acc.aiTitle = d.aiTitle;
     changed = true;
   } else if (d.type === 'last-prompt' && typeof d.lastPrompt === 'string') {
-    acc.lastPrompt = d.lastPrompt;
-    changed = true;
+    // topic 이 이제 이 값을 우선하므로(최신 질의 요약) 실프롬프트 필터를 여기도 건다 —
+    // 빈 값·커맨드 에코·중단 마커가 요약을 덮으면 안 된다.
+    const t = d.lastPrompt.trimStart();
+    if (t.trim() !== '' && !LOCAL_CMD_PREFIXES.some((x) => t.startsWith(x))
+        && !t.startsWith('[Request interrupted')) {
+      acc.lastPrompt = d.lastPrompt;
+      changed = true;
+    }
   } else if (d.type === 'permission-mode' && typeof d.permissionMode === 'string') {
     acc.mode = d.permissionMode;
     changed = true;
@@ -99,9 +106,31 @@ export function applyClaudeLine(acc: ClaudeAccum, line: string): boolean {
       acc.lastWorkAt = ts;
       changed = true;
     }
-    if (isPrompt && !Number.isNaN(ts)) {
-      acc.lastPromptAt = ts;
-      changed = true;
+    if (isPrompt) {
+      // 요약은 "마지막 질의응답"을 따라간다: 프롬프트 텍스트를 여기서 직접 갱신하고
+      // (last-prompt 레코드를 기다리지 않는다 — ts 유효성과도 무관), 이전 턴의 답변은
+      // 지운다. 안 지우면 새 질문 옆에 옛 답변이 짝지어 보인다 (codex 리뷰).
+      const promptText = firstText(content);
+      if (promptText.trim() !== '') {
+        acc.lastPrompt = promptText;
+        acc.lastReply = '';
+        changed = true;
+      }
+      if (!Number.isNaN(ts)) {
+        acc.lastPromptAt = ts;
+        changed = true;
+      }
+    }
+    if (d.type === 'assistant') {
+      // firstText 는 "첫 text 블록"이라 빈 블록에 걸릴 수 있다 — 답변은 비어있지 않은
+      // 첫 text 만 취한다. thinking/tool_use 만 있는 메시지는 답변을 덮지 않는다.
+      const replyText = items.find((item) =>
+        item !== null && typeof item === 'object' && item.type === 'text'
+        && typeof item.text === 'string' && (item.text as string).trim() !== '');
+      if (replyText) {
+        acc.lastReply = (replyText.text as string).trimStart();
+        changed = true;
+      }
     }
     if (d.type === 'assistant' && !Number.isNaN(ts)) {
       for (const item of items) {
@@ -172,7 +201,11 @@ export function claudeFields(acc: ClaudeAccum): SessionFields {
   return {
     model: acc.model,
     mode: [acc.sessionMode, acc.mode].filter(Boolean).join('·') || undefined,
-    topic: acc.aiTitle ?? truncate(acc.lastPrompt, TOPIC_MAX),
+    // 최신 질의가 요약이다 — ai-title 은 세션 초반에 한 번 생기고 고정되므로
+    // 실프롬프트가 있으면 그것이 이긴다 (2026-09-02 CJ).
+    topic: truncate(acc.lastPrompt, TOPIC_MAX) ?? acc.aiTitle,
+    lastReply: acc.lastReply === undefined ? undefined
+      : (truncate(acc.lastReply, TOPIC_MAX) ?? ''),
     cwd: acc.cwd,
     launchCwd: acc.launchCwd,
     gitBranch: acc.gitBranch,

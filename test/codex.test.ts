@@ -58,3 +58,22 @@ describe('CodexAdapter', () => {
     expect(acc.turnStartedAtMs).toBeUndefined();
   });
 });
+
+
+describe('lastReply (2026-09-02)', () => {
+  it('task_complete.last_agent_message 를 답변으로, user_message 가 지운다 — 완료시각은 그대로', () => {
+    const acc = newCodexAccum();
+    applyCodexLine(acc, JSON.stringify({
+      timestamp: '2026-09-02T00:00:01Z', type: 'event_msg',
+      payload: { type: 'task_complete', last_agent_message: '최종 답변' },
+    }));
+    expect(codexFields(acc).lastReply).toBe('최종 답변');
+    expect(acc.turnCompletedAtMs).toBe(Date.parse('2026-09-02T00:00:01Z')); // 체인 가로채기 회귀 가드
+    applyCodexLine(acc, JSON.stringify({
+      timestamp: '2026-09-02T00:00:02Z', type: 'event_msg',
+      payload: { type: 'user_message', message: '다음 질문' },
+    }));
+    expect(codexFields(acc).lastReply).toBe('');
+    expect(codexFields(acc).topic).toBe('다음 질문');
+  });
+});
