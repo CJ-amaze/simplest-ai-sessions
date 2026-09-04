@@ -5,6 +5,7 @@ import type { HookEvent } from '../types';
 export const EVENTS_DIR = join(homedir(), '.vscode-agent-monitor');
 export const EVENTS_FILE = join(EVENTS_DIR, 'events.jsonl');
 export const STATUS_FILE = join(EVENTS_DIR, 'status.jsonl');
+export const TERMNO_FILE = join(EVENTS_DIR, 'termno.json');
 
 /** statusline shim이 기록한 세션별 model/effort 라인 파싱 */
 export function parseStatusLine(line: string): { sessionId: string; effort?: string } | null {
