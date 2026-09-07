@@ -58,8 +58,8 @@ On first run it offers to install **hooks** (a Claude Code `Stop`/`Notification`
 
 Three local signal sources, reconciled every few seconds:
 
-1. **Transcript tailing** — `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/rollout-*.jsonl` are tailed incrementally (256 KB bootstrap window). Model, topic, tokens, turn boundaries, and per-line timestamps come from here.
-2. **Process reconciliation** — `ps` snapshots map live `claude`/`codex` processes to sessions (native session files → hook-verified pid → stored pid → launch-cwd heuristic → singleton pairing) and enforce the invariant *cards = live processes*.
+1. **Transcript tailing** — `~/.claude/projects/**/*.jsonl` and `~/.codex/sessions/**/rollout-*.jsonl` are tailed incrementally. Claude uses a 256 KB bootstrap window; Codex streams its initial history to recover model and turn boundaries even during long turns. Model, topic, tokens, turn boundaries, and per-line timestamps come from here.
+2. **Process reconciliation** — `ps` snapshots map live `claude`/`codex` processes to sessions (Claude native session files / Codex open rollout files → hook-verified pid → stored pid → launch-cwd heuristic → singleton pairing). Codex's npm wrapper and native binary share one identity; open rollout ownership corrects stale mappings after restart, `/new`, or `/resume`, including sessions outside the recent-date scan.
 3. **Hook events** — the installed hooks append one JSON line per event to `~/.vscode-agent-monitor/events.jsonl` (locally). This is how `Stop`, permission requests, and idle notifications are detected the moment they happen.
 
 On recent Claude Code versions (2.1.20x+), Claude Code's own per-session state files provide busy/idle directly and take precedence over inference.
@@ -77,7 +77,13 @@ Diagnostics: Output panel → **AI Sessions** channel (heartbeat + errors).
 
 ## Privacy
 
-Everything stays on your machine. The extension never makes network requests. Hook scripts write event metadata (session id, event kind, timestamp) to a local file only.
+By default, everything stays on your machine. The extension never makes network requests. Hook scripts write event metadata (session id, event kind, timestamp) to a local file.
+
+For a custom Codex completion notification, you can optionally install an executable at
+`~/.vscode-agent-monitor/codex-turn-complete.sh`. After logging a completed turn, the hook
+runs it in the background with the original Codex notification JSON as its first argument.
+That payload can include prompt and reply text; the callback controls what it sends or stores.
+No callback is installed by the extension. Claude notifications remain in Claude's own `Stop` hooks.
 
 ## Development
 

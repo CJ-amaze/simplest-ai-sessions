@@ -106,6 +106,33 @@ describe('renderCards', () => {
 
 
 describe('터미널 번호·답변 줄 (2026-09-02)', () => {
+  it('3, 1, 2 순서로 등록돼도 상태·선택과 무관하게 번호순으로 표시한다', () => {
+    const sessions = [
+      view({ key: 'claude:three', shellPid: 333, status: 'idle' }),
+      view({ key: 'codex:one', agent: 'codex', shellPid: 111, status: 'running' }),
+      view({ key: 'codex:two', agent: 'codex', shellPid: 222, status: 'idle' }),
+    ];
+    const numbers = new Map([[111, 1], [222, 2], [333, 3]]);
+    const badges = (html: string) => [...html.matchAll(/class="termno">#(\d+)/g)].map((m) => m[1]);
+    expect(badges(renderCards(sessions, 222, [], numbers))).toEqual(['1', '2', '3']);
+    sessions[0].status = 'approval';
+    sessions[1].status = 'idle';
+    expect(badges(renderCards(sessions, 333, [], numbers))).toEqual(['1', '2', '3']);
+    expect(sessions.map((s) => s.shellPid)).toEqual([333, 111, 222]);
+  });
+
+  it('일반 터미널이 세션 카드로 바뀌어도 같은 번호 위치를 유지하고 외부 세션은 뒤에 둔다', () => {
+    const numbers = new Map([[111, 1], [222, 2], [333, 3]]);
+    const sessions = [view({ key: 'external' }), view({ shellPid: 333 })];
+    const terminals = [{ shellPid: 222 }, { shellPid: 111 }];
+    const before = renderCards(sessions, 111, terminals, numbers);
+    const after = renderCards([...sessions, view({ shellPid: 111 })], 111, [terminals[0]], numbers);
+    for (const html of [before, after]) {
+      expect([...html.matchAll(/class="termno">#(\d+)/g)].map((m) => m[1])).toEqual(['1', '2', '3']);
+      expect(html.indexOf('data-key="external"')).toBeGreaterThan(html.indexOf('#3'));
+    }
+  });
+
   it('termNo 맵이 카드와 터미널 행에 #n 배지를 붙인다', () => {
     const html = renderCards(
       [view({ shellPid: 111 })], undefined,

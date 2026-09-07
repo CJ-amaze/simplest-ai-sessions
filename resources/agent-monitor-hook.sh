@@ -5,7 +5,7 @@
 #   agent-monitor-hook.sh codex '<json>'              (codex notify: JSON as last arg)
 #   agent-monitor-hook.sh codex-hook                  (codex hook: JSON on stdin)
 AGENT="$1"
-DIR="$HOME/.vscode-agent-monitor"
+DIR="${AGENT_MONITOR_DIR:-$HOME/.vscode-agent-monitor}"
 FILE="$DIR/events.jsonl"
 mkdir -p "$DIR"
 
@@ -60,5 +60,13 @@ printf '{"agent":"%s","kind":"%s","sessionId":"%s","pid":%s,"observedAt":%s}\n' 
 # rotate at 1MB (tail 파서는 size<offset 리셋으로 대응)
 if [ "$(wc -c < "$FILE" | tr -d ' ')" -gt 1048576 ]; then
   tail -c 262144 "$FILE" > "$FILE.tmp" && mv "$FILE.tmp" "$FILE"
+fi
+
+# Optional user-installed completion callback. Claude already has its own Stop hooks.
+# Keep the original Codex JSON argument and detach all I/O so a slow notifier cannot
+# delay the prompt or interrupt the local event log. No callback is installed by default.
+if [ "$AGENT" = "codex" ] && [ "$KIND" = "turn-complete" ] &&
+   [ -x "$DIR/codex-turn-complete.sh" ]; then
+  "$DIR/codex-turn-complete.sh" "$PAYLOAD" </dev/null >/dev/null 2>&1 &
 fi
 exit 0

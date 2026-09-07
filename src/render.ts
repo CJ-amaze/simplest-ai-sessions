@@ -34,15 +34,24 @@ export function renderCards(
     const n = pid !== undefined ? termNo?.get(pid) : undefined;
     return n !== undefined ? `<span class="termno">#${n}</span> ` : '';
   };
-  const termRows = terminals
-    .map((t) =>
-      `<div class="term${t.shellPid === activeShellPid ? ' active' : ''}" data-shellpid="${t.shellPid}">${no(t.shellPid)}▷ ${esc(t.name ?? 'terminal')} <span class="hint">— run claude or codex</span></div>`,
-    )
-    .join('\n');
   if (sessions.length === 0 && terminals.length === 0) {
     return '<div class="empty">No AI sessions detected<br/>Run claude or codex in a terminal</div>';
   }
-  return renderSessionCards(sessions, activeShellPid, no) + (termRows ? `\n${termRows}` : '');
+  // Badges and display order share the same terminal identity. Session discovery,
+  // status changes and promotion from a plain terminal must not move its row.
+  const rows = [
+    ...sessions.map((s) => ({
+      shellPid: s.shellPid, html: renderSessionCards([s], activeShellPid, no),
+    })),
+    ...terminals.map((t) => ({
+      shellPid: t.shellPid,
+      html: `<div class="term${t.shellPid === activeShellPid ? ' active' : ''}" data-shellpid="${t.shellPid}">${no(t.shellPid)}▷ ${esc(t.name ?? 'terminal')} <span class="hint">— run claude or codex</span></div>`,
+    })),
+  ];
+  const order = (pid?: number): number =>
+    (pid !== undefined ? termNo?.get(pid) : undefined) ?? Number.MAX_SAFE_INTEGER;
+  return rows.sort((a, b) => order(a.shellPid) - order(b.shellPid))
+    .map((row) => row.html).join('\n');
 }
 
 function renderSessionCards(sessions: SessionView[], activeShellPid?: number,

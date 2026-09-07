@@ -33,9 +33,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const eventsTail = new TailReader();
   const statusTail = new TailReader();
   const mapper = new ProcessMapper();
+  const codexWatcher = new AdapterWatcher(codexSpec(), tail, (p) => store.applyPatch(p));
   const watchers = [
     new AdapterWatcher(claudeSpec(), tail, (p) => store.applyPatch(p)),
-    new AdapterWatcher(codexSpec(), tail, (p) => store.applyPatch(p)),
+    codexWatcher,
   ];
 
   const provider = new SidebarProvider(
@@ -154,7 +155,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => clearInterval(eventsTimer) });
 
   // 프로세스 ↔ 터미널 매핑 (5s)
-  const doRemap = (): Promise<void> => refreshMapping(store, mapper);
+  const doRemap = (): Promise<void> => refreshMapping(store, mapper, codexWatcher);
   const remap = singleFlight('map', doRemap);
   const mapTimer = setInterval(remap, MAP_MS);
   context.subscriptions.push({ dispose: () => clearInterval(mapTimer) });
@@ -300,12 +301,16 @@ async function focusTerminal(store: StateStore, key: string): Promise<void> {
   }
 }
 
-async function refreshMapping(store: StateStore, mapper: ProcessMapper): Promise<void> {
+async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWatcher: AdapterWatcher): Promise<void> {
   // grace 판정 기준 시각은 pass 시작 시각 — 스냅샷 후 lsof가 오래 걸려도 그 사이 등록된
   // 세션이 "grace 만료"로 오판되지 않도록 (스냅샷에 없는 프로세스의 세션 보호)
   const passStartedAt = Date.now();
   const snap = await mapper.snapshot();
   if (!snap.ok) return; // ps 실패 — 생사 판정 근거 없음, 이번 pass 전체 skip
+
+  const codexBindings = await mapper.codexBindings(snap.agents);
+  // Resumed sessions may live outside today's/yesterday's directories.
+  codexWatcher.trackFiles([...codexBindings.values()].map((b) => b.filePath));
 
   const shellPids = new Map<number, string | undefined>();
   for (const term of vscode.window.terminals) {
@@ -323,7 +328,7 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper): Promise
   const nativeBindings = await readNativeBindings();
   const r = reconcileSessions({
     agents: snap.agents, byPid: snap.byPid, shellPids,
-    sessions: store.all(), cwdByPid, nativeBindings,
+    sessions: store.all(), cwdByPid, nativeBindings, codexBindings,
     now: passStartedAt,
   });
   // claim과 parentKey를 한 번의 setProcess로 — 분리 적용하면 자식이 parentKey 설정 전

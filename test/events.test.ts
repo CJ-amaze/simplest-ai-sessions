@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parseHookEventLine, parseStatusLine } from '../src/hooks/events';
 
 describe('parseHookEventLine', () => {
@@ -31,6 +31,47 @@ describe('parseHookEventLine', () => {
 });
 
 describe('agent-monitor-hook.sh (통합)', () => {
+  it('Codex 완료는 로그를 보존하고 선택적 콜백에 원본 JSON을 전달한다', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hook-callback-'));
+    writeFileSync(join(dir, 'codex-turn-complete.sh'),
+      '#!/bin/sh\nprintf "%s" "$1" > "$AGENT_MONITOR_DIR/callback.json"\n', { mode: 0o755 });
+    const payload = JSON.stringify({ type: 'agent-turn-complete', 'thread-id': 'th-123' });
+    execFileSync('bash', [join(__dirname, '../resources/agent-monitor-hook.sh'), 'codex', payload], {
+      env: { ...process.env, AGENT_MONITOR_DIR: dir },
+    });
+    const event = parseHookEventLine(readFileSync(join(dir, 'events.jsonl'), 'utf8').trim());
+    expect(event).toMatchObject({ agent: 'codex', kind: 'turn-complete', sessionId: 'th-123' });
+    await vi.waitFor(() => expect(readFileSync(join(dir, 'callback.json'), 'utf8')).toBe(payload));
+  });
+
+  it('Claude Stop과 Codex 승인 요청은 Codex 완료 콜백을 호출하지 않는다', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hook-callback-'));
+    writeFileSync(join(dir, 'codex-turn-complete.sh'),
+      '#!/bin/sh\nprintf called > "$AGENT_MONITOR_DIR/called"\n', { mode: 0o755 });
+    for (const args of [
+      ['claude', 'stop'], ['codex', '{"type":"approval-requested","thread-id":"th-123"}'],
+      ['codex-hook'],
+    ]) {
+      execFileSync('bash', [join(__dirname, '../resources/agent-monitor-hook.sh'), ...args], {
+        env: { ...process.env, AGENT_MONITOR_DIR: dir },
+        input: '{"session_id":"sess-1","hook_event_name":"PermissionRequest"}',
+      });
+    }
+    expect(existsSync(join(dir, 'called'))).toBe(false);
+    expect(readFileSync(join(dir, 'events.jsonl'), 'utf8').trim().split('\n')).toHaveLength(3);
+  });
+
+  it('완료 콜백이 실패해도 모니터 훅은 성공하고 완료 로그가 남는다', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hook-callback-'));
+    writeFileSync(join(dir, 'codex-turn-complete.sh'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    execFileSync('bash', [join(__dirname, '../resources/agent-monitor-hook.sh'), 'codex',
+      '{"type":"agent-turn-complete","thread-id":"th-123"}'], {
+      env: { ...process.env, AGENT_MONITOR_DIR: dir },
+    });
+    expect(parseHookEventLine(readFileSync(join(dir, 'events.jsonl'), 'utf8').trim())?.kind)
+      .toBe('turn-complete');
+  });
+
   it('claude stdin 모드로 이벤트 append', () => {
     const home = mkdtempSync(join(tmpdir(), 'hookhome-'));
     execFileSync('bash', [join(__dirname, '../resources/agent-monitor-hook.sh'), 'claude', 'notification'], {

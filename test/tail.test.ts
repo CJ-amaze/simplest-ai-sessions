@@ -54,4 +54,18 @@ describe('TailReader', () => {
     const t = new TailReader();
     expect((await t.readNewLines('/nonexistent/x.jsonl')).lines).toEqual([]);
   });
+
+  it('streams large files and preserves UTF-8 split across chunks and appends', async () => {
+    const prefix = 'a'.repeat(64 * 1024 - 1);
+    const f = tmpFile(prefix + '선택\n');
+    const t = new TailReader();
+    const seen: string[] = [];
+    expect((await t.readNewLines(f, { onLine: (l) => seen.push(l) })).lines).toEqual([]);
+    expect(seen).toEqual([prefix + '선택']);
+    const bytes = Buffer.from('작업\n');
+    appendFileSync(f, bytes.subarray(0, 1));
+    expect((await t.readNewLines(f)).lines).toEqual([]);
+    appendFileSync(f, bytes.subarray(1));
+    expect((await t.readNewLines(f)).lines).toEqual(['작업']);
+  });
 });

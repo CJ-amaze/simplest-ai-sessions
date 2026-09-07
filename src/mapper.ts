@@ -71,6 +71,44 @@ export function detectAgent(command: string): AgentKind | null {
 
 const TRANSCRIPT_UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl/;
 
+export interface CodexBinding { sessionId: string; filePath: string }
+
+/** lsof's process records identify the rollout actually held open by Codex. */
+export function parseCodexBindings(output: string): Map<number, CodexBinding> {
+  const files = new Map<number, Map<string, CodexBinding>>();
+  let pid: number | undefined;
+  for (const line of output.split('\n')) {
+    if (/^p\d+$/.test(line)) pid = Number(line.slice(1));
+    if (pid === undefined || !line.startsWith('n/')) continue;
+    const filePath = line.slice(1);
+    if (!/\/rollout-[^/]+\.jsonl$/.test(filePath)) continue;
+    const sid = filePath.match(TRANSCRIPT_UUID_RE)?.[1];
+    if (!sid) continue;
+    if (!files.has(pid)) files.set(pid, new Map());
+    files.get(pid)!.set(filePath, { sessionId: sid, filePath });
+  }
+  const bindings = new Map<number, CodexBinding>();
+  for (const [owner, paths] of files) {
+    // Multiple live rollouts in one process are ambiguous; never guess an owner.
+    if (paths.size === 1) bindings.set(owner, [...paths.values()][0]);
+  }
+  return bindings;
+}
+
+/** The npm wrapper and its direct Codex binary represent the same session. */
+function agentOwner(pid: number, byPid: Map<number, ProcInfo>): number {
+  const seen = new Set<number>();
+  let proc = byPid.get(pid);
+  while (proc && !seen.has(proc.pid)) {
+    seen.add(proc.pid);
+    const parent = byPid.get(proc.ppid);
+    const kind = detectAgent(proc.command);
+    if (!kind || !parent || detectAgent(parent.command) !== kind) break;
+    proc = parent;
+  }
+  return proc?.pid ?? pid;
+}
+
 /**
  * 데몬이 스폰한 bg 서브에이전트의 부모 세션 추출 — `--fork-session --resume <부모 transcript>`
  * 커맨드라인이 유일한 신호다 (ppid=1이라 프로세스 트리로는 추적 불가).
@@ -115,6 +153,7 @@ export interface ReconcileInput {
   cwdByPid: Map<number, string | undefined>;
   /** Claude Code 자체 선언 바인딩 (~/.claude/sessions/<pid>.json) — 최우선 신호. name은 표시용 */
   nativeBindings?: Map<number, { sessionId: string; status?: 'busy' | 'idle'; name?: string }>;
+  codexBindings?: Map<number, CodexBinding>;
   now: number;
 }
 
@@ -139,14 +178,14 @@ export interface ReconcileResult {
 
 /**
  * 프로세스 ↔ 세션 reconciliation (순수 함수 — 직접 테스트 가능).
- * 클레임 우선순위: (1) s.hookPid — 훅이 커널에서 보증하는 $PPID, 가장 강한 증거이므로
+ * 클레임 우선순위: (0) native session / open rollout → (1) s.hookPid — 훅의 $PPID,
  * 잘못 고착된 저장 pid도 매 pass 교정한다 → (2) s.pid(이전 pass의 결과) → (3) cwd 휴리스틱
  * (launchCwd 우선 — 세션 내부 cd로 표시용 cwd가 바뀌어도 프로세스 OS cwd는 시작 디렉토리)
  * → (4) singleton pairing. 프로세스·세션 모두 1회만 소비. 클레임 실패 세션은 즉시 exited
  * — "카드 수 = 살아있는 agent 프로세스 수" 불변식.
  */
 export function reconcileSessions(input: ReconcileInput): ReconcileResult {
-  const { byPid, shellPids, sessions, cwdByPid, nativeBindings, now } = input;
+  const { byPid, shellPids, sessions, cwdByPid, nativeBindings, codexBindings, now } = input;
   // 래퍼 collapse: "직계 부모"가 같은 agent인 프로세스만 제외 (node 래퍼 → 바이너리는 항상
   // 직접 부모-자식). 진짜 동종 서브에이전트는 셸(zsh -c)을 거쳐 스폰되므로 걸러지지 않음.
   const agents = input.agents.filter((p) => {
@@ -163,6 +202,10 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
   // 아직 미등록일 때 같은 pid를 기록한 옛 세션이 pass 1/2로 가로채는 것(유령 부활 +
   // 플레이스홀더 누락)을 막는다.
   const boundKeyByPid = new Map<number, string>();
+  for (const [pid, binding] of codexBindings ?? []) {
+    if (detectAgent(byPid.get(pid)?.command ?? '') !== 'codex') continue;
+    boundKeyByPid.set(agentOwner(pid, byPid), `codex:${binding.sessionId}`);
+  }
   if (nativeBindings) {
     for (const [pid, nat] of nativeBindings) {
       const proc = byPid.get(pid);
@@ -202,6 +245,15 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
     });
   };
 
+  // Open rollout ownership wins over hooks, cached PIDs and cwd guesses, including
+  // /new and /resume in an existing process. Reserve the PID even before discovery.
+  for (const proc of agents) {
+    const key = boundKeyByPid.get(proc.pid);
+    if (!key || agentOf(proc) !== 'codex') continue;
+    const match = sessions.find((s) => s.key === key && !claimedSessions.has(key));
+    if (match) claim(proc, match, 'exact');
+  }
+
   // pass 0: Claude Code 자체 선언 (~/.claude/sessions/<pid>.json) — 추측이 아닌 사실.
   // 어떤 휴리스틱·저장값과 충돌해도 이것이 이긴다
   if (nativeBindings) {
@@ -216,7 +268,7 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
       if (match) claim(proc, match, 'exact');
     }
   }
-  // pass 1/2: exact — hookPid(가장 강한 신호)가 먼저, 저장된 pid는 그다음.
+  // pass 1/2: exact — hookPid가 먼저, 저장된 pid는 그다음 (native/open rollout 우선).
   // 순서가 반대면 재시작 레이스 등으로 한 번 잘못 저장된 pid가 영원히 고착되어
   // 올바른 hookPid가 도착해도 교정 기회를 얻지 못한다 (우선순위 역전)
   for (const field of ['hookPid', 'pid'] as const) {
@@ -225,7 +277,8 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
       const agent = agentOf(proc);
       if (!agent) continue;
       const match = byAgentRecent(agent).find(
-        (s) => s[field] === proc.pid && !claimedSessions.has(s.key) && claimAllowed(proc, s.key),
+        (s) => s[field] !== undefined && agentOwner(s[field]!, byPid) === proc.pid &&
+          !claimedSessions.has(s.key) && claimAllowed(proc, s.key),
       );
       if (match) claim(proc, match, 'exact');
     }
@@ -314,6 +367,19 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
 }
 
 export class ProcessMapper {
+  async codexBindings(agents: ProcInfo[]): Promise<Map<number, CodexBinding>> {
+    const pids = agents.filter((p) => detectAgent(p.command) === 'codex').map((p) => p.pid);
+    if (pids.length === 0) return new Map();
+    try {
+      const { stdout } = await execFileP('lsof', ['-a', '-p', pids.join(','), '-Fn'], {
+        timeout: 3_000, maxBuffer: 8 * 1024 * 1024,
+      });
+      return parseCodexBindings(stdout);
+    } catch {
+      return new Map();
+    }
+  }
+
   async snapshot(): Promise<{ ok: boolean; byPid: Map<number, ProcInfo>; agents: ProcInfo[] }> {
     try {
       const { stdout } = await execFileP('ps', ['-axo', 'pid=,ppid=,pcpu=,command='], {

@@ -105,6 +105,11 @@ export function codexSpec(root = join(homedir(), '.codex', 'sessions')): Adapter
 
 export class AdapterWatcher {
   private accums = new Map<string, unknown>();
+  private discoveredFiles = new Set<string>();
+
+  trackFiles(files: Iterable<string>): void {
+    for (const file of files) this.discoveredFiles.add(file);
+  }
 
   constructor(
     private spec: AdapterSpec,
@@ -113,7 +118,8 @@ export class AdapterWatcher {
   ) {}
 
   async scan(now: number): Promise<void> {
-    const files = await this.spec.listFiles();
+    const files = [...new Set([...await this.spec.listFiles(), ...this.discoveredFiles])];
+    this.discoveredFiles.clear();
     // listFiles()가 스캔 범위(codex: 오늘+어제 디렉토리)를 벗어나도, 이미 추적 중이던 파일은
     // 디스크에 남아있는 한 계속 스캔 대상에 포함 — 장기 세션이 tail에서 이탈하지 않도록 (F4)
     const seen = new Set(files);
@@ -133,20 +139,26 @@ export class AdapterWatcher {
       if (!sid) continue;
       const isNew = !this.accums.has(f);
       if (isNew) this.accums.set(f, this.spec.createAccum());
-      const { lines, reset } = await this.tail.readNewLines(f, { bootstrapBytes: BOOTSTRAP_BYTES });
+      // Codex writes model/turn_context only at turn boundaries. Replaying just
+      // the last 256 KiB loses both the model and open turn on long sessions.
+      // Stream the initial history so memory stays bounded to individual lines.
+      let changed = false;
+      let lineCount = 0;
+      const { reset } = await this.tail.readNewLines(f, {
+        bootstrapBytes: this.spec.agent === 'codex' ? undefined : BOOTSTRAP_BYTES,
+        onReset: () => this.accums.set(f, this.spec.createAccum()),
+        onLine: (line) => {
+          lineCount++;
+          changed = this.spec.applyLine(this.accums.get(f)!, line) || changed;
+        },
+      });
       const st = await fs.stat(f).catch(() => null);
       const eventTime = st?.mtimeMs ?? now;
-      if (reset) {
-        // 파일 truncate/교체 — 누적값(토큰 합산 등)이 중복되지 않도록 accumulator 재생성
-        this.accums.set(f, this.spec.createAccum());
-      }
       const acc = this.accums.get(f)!;
-      let changed = false;
-      for (const ln of lines) changed = this.spec.applyLine(acc, ln) || changed;
       if (!changed && !isNew && !reset) {
         // 파서가 모르는 라인이라도 append 자체는 활동 신호 — 최소 patch로 lastActivityAt만 갱신
         // (완전 무음이면 running 세션이 idle로 오판됨)
-        if (lines.length > 0) {
+        if (lineCount > 0) {
           this.onPatch({
             agent: this.spec.agent, sessionId: sid, filePath: f, fields: { lastActivityAt: eventTime },
           });
