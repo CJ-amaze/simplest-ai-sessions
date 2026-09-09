@@ -27,6 +27,7 @@ export function assignTermNumbers(
       if (n === 1 && pid !== pinned) state.no.set(pid, state.next++);
     }
     state.no.set(pinned, 1);
+    if (state.next < 2) state.next = 2; // #1 을 썼으니 새 번호가 1 을 재사용하지 않게 (reserveFirst 가 꺼져 있어도)
   }
   for (const pid of live) {
     if (!state.no.has(pid)) state.no.set(pid, state.next++);

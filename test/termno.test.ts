@@ -44,6 +44,11 @@ describe('assignTermNumbers', () => {
     assignTermNumbers(st, [10], undefined, false);
     expect(st.no.get(10)).toBe(2);
   });
+  it('핀은 있는데 reserveFirst 가 꺼진 조합에서도 #1 이 중복되지 않는다 (codex 리뷰)', () => {
+    const st = fresh();
+    assignTermNumbers(st, [10, 20], 10, false);
+    expect([...st.no]).toEqual([[10, 1], [20, 2]]);
+  });
   it('일회성 iterator 입력도 동작', () => {
     const st = fresh();
     assignTermNumbers(st, new Set([10, 20]).values(), 20, true);
