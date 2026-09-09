@@ -59,6 +59,8 @@ export interface SessionState extends Required<Pick<SessionFields, 'lastActivity
   processAlive?: boolean;   // undefined = 미확인(외부)
   busy?: boolean;           // 프로세스 트리 CPU 사용 중 — 긴 도구/사고(작업중) vs Esc 중단(대기) 판별
   nativeStatus?: 'busy' | 'idle'; // Claude Code 자체 상태(~/.claude/sessions/<pid>.json) — 있으면 최우선
+  name?: string;            // Claude Code 세션 이름(`claude -n <이름>` 또는 파생) — 네이티브 바인딩
+  nameSource?: 'user' | 'derived'; // user 만 카드에 고정 이름 줄로 표시
   everAlive?: boolean;      // 이번 확장 수명 중 생존 확인된 적 있음 (부트스트랩 유령 즉시 제거용)
   mapping: MappingConfidence;
   parentKey?: string;       // 부모 세션 key (다른 agent 프로세스가 띄운 서브에이전트)

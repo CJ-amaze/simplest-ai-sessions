@@ -7,8 +7,8 @@ import { AdapterWatcher, claudeSpec, codexSpec } from './adapters/watcher';
 import { EVENTS_FILE, parseHookEventLine, parseStatusLine, STATUS_FILE } from './hooks/events';
 import { installHooks, removeHooks, statusShimPath, writeShim } from './hooks/installer';
 import {
-  autoAttachTargets, ENSURE_GRACE_MS, ensureDue, expandHome, findTmux, ProcessMapper, reconcileSessions,
-  tmuxRefKey, tmuxSessions,
+  autoAttachTargets, ENSURE_GRACE_MS, ensureDue, expandHome, findTmux, idleShellPids, ProcessMapper,
+  reconcileSessions, tmuxRefKey, tmuxSessions,
 } from './mapper';
 import type { EnsureEntry, EnsureState, ReconcileResult, TmuxInfo } from './mapper';
 import { SidebarProvider } from './sidebar';
@@ -32,6 +32,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   logChannel = vscode.window.createOutputChannel('AI Sessions');
   context.subscriptions.push(logChannel);
   log(`activate v${(context.extension.packageJSON as { version?: string }).version ?? '?'}`);
+  // 시작 정리 후보는 활성화 진입 시점의 터미널만 — priming 동안 사용자가 새로 연 터미널은 건드리지 않는다
+  const initialTerminals = new Set(vscode.window.terminals);
 
   const store = new StateStore();
   const tail = new TailReader();
@@ -172,7 +174,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await doRemap().catch((e) => log(`priming map: ${String(e).slice(0, 120)}`));
     log('priming 완료 (등록→이벤트→매핑)');
     // 시작 레이아웃은 첫 매핑(ensure·자동 attach 가 터미널을 만든 뒤)에 이어서
-    await applyStartupLayout().catch((e) => log(`startup layout: ${String(e).slice(0, 120)}`));
+    await applyStartupLayout(store, mapper, initialTerminals)
+      .catch((e) => log(`startup layout: ${String(e).slice(0, 120)}`));
   })();
 
   // 상태 tick (5s) — store 변경이 없어도 시간 경과(running→idle, 외부 exited)로
@@ -265,6 +268,7 @@ interface NativeBinding {
   sessionId: string;
   status?: 'busy' | 'idle';
   name?: string;
+  nameSource?: 'user' | 'derived'; // user = `claude -n <이름>`; derived = cwd 등에서 파생
   tmux?: string; // "session:@window.%pane" — tmux 안에서 뜬 세션 (2.1.26x+)
 }
 
@@ -285,13 +289,14 @@ async function readNativeBindings(): Promise<Map<number, NativeBinding>> {
     if (!name.endsWith('.json')) continue;
     try {
       const d = JSON.parse(await fs.promises.readFile(path.join(dir, name), 'utf8')) as {
-        pid?: number; sessionId?: string; status?: string; name?: string; tmux?: string;
+        pid?: number; sessionId?: string; status?: string; name?: string; nameSource?: string; tmux?: string;
       };
       if (typeof d.pid === 'number' && typeof d.sessionId === 'string') {
         map.set(d.pid, {
           sessionId: d.sessionId,
           status: d.status === 'busy' || d.status === 'idle' ? d.status : undefined,
           name: typeof d.name === 'string' && d.name.length > 0 ? d.name : undefined,
+          nameSource: d.nameSource === 'user' || d.nameSource === 'derived' ? d.nameSource : undefined,
           tmux: typeof d.tmux === 'string' && d.tmux.length > 0 ? d.tmux : undefined,
         });
       }
@@ -491,7 +496,9 @@ function forgetEnsureTerminal(t: vscode.Terminal): void {
 }
 
 // ---- 시작 레이아웃 (설정 aiSessions.startupLayout.*) — 창 로드·reload 마다 activate 에서 한 번 ----
-async function applyStartupLayout(): Promise<void> {
+async function applyStartupLayout(
+  store: StateStore, mapper: ProcessMapper, initialTerminals: ReadonlySet<vscode.Terminal>,
+): Promise<void> {
   const cfg = vscode.workspace.getConfiguration('aiSessions');
   if (!cfg.get<boolean>('startupLayout.enabled', false)) return;
   for (const c of cfg.get<unknown[]>('startupLayout.commands', [])) {
@@ -504,8 +511,14 @@ async function applyStartupLayout(): Promise<void> {
     }
   }
   const name = cfg.get<string>('startupLayout.focusTerminal', '');
-  if (!name) return;
-  // ensure(main.sh)·자동 attach 가 만든 터미널은 몇 초 뒤에 생길 수 있다 — 최대 30초 기다린다
+  if (name) await focusTerminalByName(name);
+  if (cfg.get<boolean>('startupLayout.closeIdleTerminals', false)) {
+    await closeIdleTerminals(store, mapper, initialTerminals);
+  }
+}
+
+/** ensure(main.sh)·자동 attach 가 만든 터미널은 몇 초 뒤에 생길 수 있다 — 최대 30초 기다린다 */
+async function focusTerminalByName(name: string): Promise<void> {
   for (let i = 0; i < 30; i++) {
     const t = vscode.window.terminals.find((x) => x.name === name);
     if (t) {
@@ -516,6 +529,35 @@ async function applyStartupLayout(): Promise<void> {
     await new Promise((r) => setTimeout(r, 1_000));
   }
   log(`startup layout: terminal "${name}" 30s 안에 없음`);
+}
+
+/**
+ * 앱 재시작으로 복원됐지만 빈 셸만 남은 터미널을 닫는다. 판정은 정리 직전의 새 ps 스냅샷으로
+ * (세션 카드에 매핑된 터미널·확장이 만든 attach/ensure 터미널·셸이 아닌 것·자식이 있는 것은 제외).
+ */
+async function closeIdleTerminals(
+  store: StateStore, mapper: ProcessMapper, candidates: ReadonlySet<vscode.Terminal>,
+): Promise<void> {
+  const ours = new Set<vscode.Terminal>([...attachTerminals.values(), ...ensureTerminals.values()]);
+  const byPid = new Map<number, vscode.Terminal>();
+  for (const t of vscode.window.terminals) {
+    if (!candidates.has(t) || ours.has(t)) continue;
+    const pid = await terminalPid(t);
+    if (pid !== undefined) byPid.set(pid, t);
+  }
+  // pid 조회(각 1초까지 걸릴 수 있음)를 끝낸 뒤 스냅샷 — 그 사이 시작된 작업이 "자식 없음" 으로 오판되지 않도록
+  const snap = await mapper.snapshot();
+  if (!snap.ok) {
+    log('startup layout: 빈 터미널 정리 건너뜀 — ps 실패');
+    return;
+  }
+  const protect = store.usedShellPids();
+  for (const pid of idleShellPids(byPid.keys(), snap.byPid, protect)) {
+    const t = byPid.get(pid);
+    if (!t) continue;
+    log(`startup layout: 빈 터미널 닫음 "${t.name}" (shell pid ${pid})`);
+    t.dispose();
+  }
 }
 
 async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWatcher: AdapterWatcher): Promise<void> {
@@ -560,6 +602,7 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
       parentKey: parentByKey.get(c.key) ?? null,
       busy: c.busy,
       nativeStatus: c.nativeStatus ?? null, // 파일 없으면 해제 (stale 상태 잔류 방지)
+      name: c.name ?? null, nameSource: c.nameSource ?? null,
     });
   }
   // 어느 프로세스도 클레임하지 않은 세션 = 프로세스 소멸 — 즉시 exited

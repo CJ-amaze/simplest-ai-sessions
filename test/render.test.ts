@@ -168,3 +168,12 @@ describe('tmux 칩 (2026-09-08)', () => {
     expect(html).toContain('tmux:a&lt;b');
   });
 });
+
+describe('세션 이름 줄 (0.5.1)', () => {
+  it('nameSource user 면 고정 이름 줄, derived 면 없음, escape', () => {
+    expect(renderCards([view({ name: 'xr-merch-0908', nameSource: 'user', topic: '마지막 질문' })]))
+      .toContain('<div class="name">xr-merch-0908</div>');
+    expect(renderCards([view({ name: 'cji-41', nameSource: 'derived' })])).not.toContain('class="name"');
+    expect(renderCards([view({ name: 'a<b', nameSource: 'user' })])).toContain('<div class="name">a&lt;b</div>');
+  });
+});

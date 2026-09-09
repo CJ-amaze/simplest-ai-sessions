@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ancestorChain, detectAgent, PAIRING_FRESH_MS, parseForkParentSessionId, parsePsOutput,
-  autoAttachTargets, ENSURE_COOLDOWN_MS, ENSURE_GRACE_MS, ensureDue, expandHome, parseTmuxClients,
+  autoAttachTargets, ENSURE_COOLDOWN_MS, ENSURE_GRACE_MS, ensureDue, expandHome, idleShellPids, parseTmuxClients,
   parseTmuxPanes, parseTmuxSessionNames, parseTmuxTarget, REGISTER_GRACE_MS, reconcileSessions, tmuxRefKey,
   tmuxSessions,
 } from '../src/mapper';
@@ -658,5 +658,28 @@ describe('ensureDue / expandHome (aiSessions.tmuxEnsure)', () => {
     expect(expandHome('~', '/Users/cj')).toBe('/Users/cj');
     expect(expandHome('/abs/~/x', '/Users/cj')).toBe('/abs/~/x');
     expect(expandHome('~user/x', '/Users/cj')).toBe('~user/x');
+  });
+});
+
+describe('네이티브 세션 이름·빈 터미널 판정 (0.5.1)', () => {
+  it('claims 에 네이티브 바인딩의 name/nameSource 전달', () => {
+    const proc = { pid: 700, ppid: 600, pcpu: 0, command: 'claude -n xr-merch-0908' };
+    const r = reconcileSessions(makeInput({
+      agents: [proc], byPid: new Map([[700, proc]]),
+      sessions: [sess('claude:a', { pid: 700 })],
+      nativeBindings: new Map([[700, { sessionId: 'a', name: 'xr-merch-0908', nameSource: 'user' as const }]]),
+    }));
+    expect(r.claims[0]).toMatchObject({ name: 'xr-merch-0908', nameSource: 'user' });
+  });
+  it('idleShellPids: 자식 없는 셸만 — 스냅샷 부재·비셸·보호·자식 있음은 제외, 로그인 셸(-zsh)도 셸', () => {
+    const byPid = new Map([
+      [600, { pid: 600, ppid: 500, pcpu: 0, command: '/bin/zsh -il' }],   // 빈 셸
+      [601, { pid: 601, ppid: 500, pcpu: 0, command: '-zsh' }],           // 빈 로그인 셸
+      [602, { pid: 602, ppid: 500, pcpu: 0, command: '/bin/zsh -il' }],   // 자식 있음
+      [700, { pid: 700, ppid: 602, pcpu: 0, command: 'npm run dev' }],
+      [603, { pid: 603, ppid: 500, pcpu: 0, command: '/opt/homebrew/bin/tmux attach-session -t $13' }], // 셸 아님
+      [604, { pid: 604, ppid: 500, pcpu: 0, command: '/bin/bash' }],      // 보호 대상
+    ]);
+    expect(idleShellPids([600, 601, 602, 603, 604, 999], byPid, new Set([604]))).toEqual([600, 601]);
   });
 });

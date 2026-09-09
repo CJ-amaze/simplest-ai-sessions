@@ -221,6 +221,32 @@ export function autoAttachTargets(
   return [...out.values()];
 }
 
+// ---- 시작 시 빈 터미널 정리 (설정 aiSessions.startupLayout.closeIdleTerminals) ----
+const SHELL_NAMES = new Set(['zsh', 'bash', 'sh', 'fish', 'tcsh', 'ksh', 'dash', 'nu', 'pwsh']);
+
+/**
+ * "빈 셸" 인 터미널 셸 pid — 앱 재시작으로 복원됐지만 아무것도 안 하는 터미널을 닫기 위한 판정.
+ * 스냅샷에 없거나(막 죽었거나 새로 생김), 셸이 아니거나(exec 로 바뀐 프로그램), 보호 대상(세션 카드·확장이 만든 터미널),
+ * 자식 프로세스가 하나라도 있으면(뭔가 돌고 있음) 제외. 입력 중·내장 명령 상태는 판별 불가 — 자식 없는 셸은 빈 것으로 본다.
+ */
+export function idleShellPids(
+  shellPids: Iterable<number>, byPid: Map<number, ProcInfo>, protect: ReadonlySet<number>,
+): number[] {
+  const hasChild = new Set<number>();
+  for (const p of byPid.values()) hasChild.add(p.ppid);
+  const out: number[] = [];
+  for (const pid of shellPids) {
+    if (protect.has(pid)) continue;
+    const proc = byPid.get(pid);
+    if (!proc) continue;
+    const base = (proc.command.split(/\s+/)[0] ?? '').replace(/^-/, '').split('/').pop() ?? '';
+    if (!SHELL_NAMES.has(base)) continue;
+    if (hasChild.has(pid)) continue;
+    out.push(pid);
+  }
+  return out;
+}
+
 // ---- tmux ensure (설정 aiSessions.tmuxEnsure) ----
 export interface EnsureEntry { session: string; command: string; offFile?: string }
 export interface EnsureState {
@@ -302,7 +328,9 @@ export interface ReconcileInput {
   /** 사전 조회된 agent 프로세스 cwd (없으면 휴리스틱 매칭 불가) */
   cwdByPid: Map<number, string | undefined>;
   /** Claude Code 자체 선언 바인딩 (~/.claude/sessions/<pid>.json) — 최우선 신호. name은 표시용 */
-  nativeBindings?: Map<number, { sessionId: string; status?: 'busy' | 'idle'; name?: string; tmux?: string }>;
+  nativeBindings?: Map<number, {
+    sessionId: string; status?: 'busy' | 'idle'; name?: string; nameSource?: 'user' | 'derived'; tmux?: string;
+  }>;
   codexBindings?: Map<number, CodexBinding>;
   /** tmux 서버 조회 결과. undefined = 조회 실패(불확실) — tmux 경유 shellPid 는 기존값을 유지한다 */
   tmux?: TmuxInfo;
@@ -319,6 +347,8 @@ export interface ReconcileResult {
     tmux?: TmuxRef;           // tmux 경유 프로세스 — shellPid 없으면 클릭 시 attach
     busy: boolean; // 프로세스 트리에 유의미한 CPU 사용 존재 (Esc 중단 vs 긴 도구 실행 판별)
     nativeStatus?: 'busy' | 'idle'; // Claude Code 자체 선언 상태 (있을 때만)
+    name?: string;                  // 네이티브 바인딩의 세션 이름
+    nameSource?: 'user' | 'derived';
   }>;
   /** 어느 프로세스도 클레임하지 않은 세션 — 즉시 exited 처리 대상 (등록 grace 지난 것만) */
   exited: string[];
@@ -439,6 +469,8 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
       ...locateTerminal(proc, s.shellPid),
       busy: isBusy(proc.pid, byPid),
       nativeStatus: nativeBindings?.get(proc.pid)?.status,
+      name: nativeBindings?.get(proc.pid)?.name,
+      nameSource: nativeBindings?.get(proc.pid)?.nameSource,
     });
   };
 

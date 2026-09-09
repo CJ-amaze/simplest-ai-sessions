@@ -80,7 +80,7 @@ function renderSessionCards(sessions: SessionView[], activeShellPid?: number,
           : '';
       return `<div class="card ${s.status}${s.status === 'exited' ? ' dim' : ''}${isActive ? ' active' : ''}" data-key="${esc(s.key)}">
   <div class="row1">${lead}<span class="status">${STATUS_LABEL[s.status]}</span>
-    <span class="model">${esc(s.model ?? s.agent)}</span></div>
+    <span class="model">${esc(s.model ?? s.agent)}</span></div>${s.name && s.nameSource === 'user' ? `\n  <div class="name">${esc(s.name)}</div>` : ''}
   <div class="row2">${esc([s.effort, s.mode].filter(Boolean).join('·'))}${s.pid !== undefined ? ` · pid ${s.pid}` : ''}</div>
   <div class="topic">${esc(title)}</div>${s.lastReply ? `\n  <div class="reply">↳ ${esc(s.lastReply)}</div>` : ''}
   <div class="row3">${esc(meta2)}</div>
@@ -107,6 +107,7 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); 
 .empty { opacity: 0.6; text-align: center; padding: 24px 8px; line-height: 1.7; }
 .termno { opacity: 0.55; font-weight: 600; font-variant-numeric: tabular-nums; }
 .tmux { opacity: 0.6; font-weight: 600; font-size: 0.85em; }
+.name { font-weight: 600; font-size: 0.95em; margin: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .reply { opacity: 0.6; font-size: 0.85em; margin-top: 1px; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .card { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px 10px;

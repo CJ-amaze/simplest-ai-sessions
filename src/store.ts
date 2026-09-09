@@ -57,6 +57,8 @@ export class StateStore {
       next.terminalName = undefined; // 이전 터미널 잔재 — 새 매핑이 다시 채움
       next.shellPid = undefined;
       next.tmux = undefined;
+      next.name = undefined; // 새 프로세스의 바인딩이 다시 채움
+      next.nameSource = undefined;
     }
     this.sessions.set(key, next);
     this.emit();
@@ -101,6 +103,8 @@ export class StateStore {
       parentKey?: string | null;
       busy?: boolean;
       nativeStatus?: 'busy' | 'idle' | null; // null = 파일 사라짐 → 해제
+      name?: string | null;                   // 네이티브 세션 이름. null = 해제
+      nameSource?: 'user' | 'derived' | null;
     },
     now: number = Date.now(),
   ): void {
@@ -110,6 +114,10 @@ export class StateStore {
     if (info.busy !== undefined) s.busy = info.busy;
     if (info.nativeStatus === null) s.nativeStatus = undefined;
     else if (info.nativeStatus !== undefined) s.nativeStatus = info.nativeStatus;
+    if (info.name === null) s.name = undefined;
+    else if (info.name !== undefined) s.name = info.name;
+    if (info.nameSource === null) s.nameSource = undefined;
+    else if (info.nameSource !== undefined) s.nameSource = info.nameSource;
     if (info.mapping !== undefined) s.mapping = info.mapping;
     if (info.terminalName !== undefined) s.terminalName = info.terminalName;
     if (info.shellPid === null) {

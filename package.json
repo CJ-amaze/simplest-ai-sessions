@@ -2,7 +2,7 @@
   "name": "simplest-ai-sessions",
   "displayName": "Simplest AI Sessions",
   "description": "The simplest AI session manager for VS Code — a local, passive monitor for Claude Code & Codex CLI sessions. No API keys, no LLM calls.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "cj-amaze",
   "private": true,
   "license": "MIT",
@@ -63,11 +63,23 @@
           "markdownDescription": "Keep these tmux sessions alive. When a listed `session` is missing, `command` runs in a new terminal named after the session (via `$SHELL -lc`). The command must be idempotent (e.g. `tmux new-session -A …`). Skipped while `offFile` exists. Put this in **workspace** settings so only that window does it.",
           "items": {
             "type": "object",
-            "required": ["session", "command"],
+            "required": [
+              "session",
+              "command"
+            ],
             "properties": {
-              "session": { "type": "string", "description": "tmux session name" },
-              "command": { "type": "string", "description": "Shell command that creates (or attaches to) the session" },
-              "offFile": { "type": "string", "description": "If this file exists, do nothing (pause switch)" }
+              "session": {
+                "type": "string",
+                "description": "tmux session name"
+              },
+              "command": {
+                "type": "string",
+                "description": "Shell command that creates (or attaches to) the session"
+              },
+              "offFile": {
+                "type": "string",
+                "description": "If this file exists, do nothing (pause switch)"
+              }
             }
           }
         },
@@ -78,14 +90,23 @@
         },
         "aiSessions.startupLayout.commands": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["workbench.action.closeAllEditors"],
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "workbench.action.closeAllEditors"
+          ],
           "description": "VS Code command ids to run at startup, in order (e.g. workbench.action.closeAllEditors, aiSessions.sidebar.focus)."
         },
         "aiSessions.startupLayout.focusTerminal": {
           "type": "string",
           "default": "",
           "description": "Terminal name to show and focus after the startup commands (waits up to 30s for it to appear). Empty = none."
+        },
+        "aiSessions.startupLayout.closeIdleTerminals": {
+          "type": "boolean",
+          "default": false,
+          "description": "After the startup commands, close terminals that were present at startup but hold only an idle shell (no child processes) and no AI session — e.g. empty shells restored after an app restart. Terminals created by this extension and any terminal running something are kept."
         }
       }
     }

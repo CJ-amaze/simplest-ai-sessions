@@ -328,3 +328,20 @@ describe('tmux (2026-09-08)', () => {
     expect(s.find('claude:a')?.tmux).toBeUndefined();
   });
 });
+
+describe('네이티브 세션 이름 (0.5.1)', () => {
+  it('setProcess: name/nameSource 저장, null 해제, 부활 시 초기화', () => {
+    const s = new StateStore();
+    patch(s, 'a', T);
+    s.setProcess('claude:a', { alive: true, name: 'main-0908', nameSource: 'user' });
+    expect(s.find('claude:a')).toMatchObject({ name: 'main-0908', nameSource: 'user' });
+    s.setProcess('claude:a', { name: undefined });
+    expect(s.find('claude:a')?.name).toBe('main-0908');
+    s.setProcess('claude:a', { name: null, nameSource: null });
+    expect(s.find('claude:a')?.name).toBeUndefined();
+    s.setProcess('claude:a', { alive: true, name: 'main-0908', nameSource: 'user' });
+    s.setProcess('claude:a', { alive: false }, T + 1000);
+    patch(s, 'a', T + 2000);
+    expect(s.find('claude:a')?.name).toBeUndefined();
+  });
+});
