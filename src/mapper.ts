@@ -142,10 +142,27 @@ export function ancestorChain(pid: number, byPid: Map<number, ProcInfo>): number
 // 그 세션에 붙은 클라이언트 pid 의 조상 체인에서 VS Code 터미널 셸을 찾는다.
 
 export interface TmuxInfo {
-  /** pane_pid → pane 위치 */
+  /** pane_pid → pane 위치. linked window 는 같은 pane 이 여러 세션에 나오므로 세션 목록으로는 불완전 */
   panesByPid: Map<number, TmuxRef>;
   /** session_name → 붙은 클라이언트 pid 들 (detached 세션은 항목 없음) */
   clientPidsBySession: Map<string, number[]>;
+  /** 존재하는 세션 이름 전부 (list-panes 출력의 모든 줄에서) — 없으면 panesByPid 에서 유도 */
+  sessions?: ReadonlySet<string>;
+}
+
+/** tmux 에 존재하는 세션 이름 집합 */
+export function tmuxSessions(tmux: TmuxInfo): Set<string> {
+  return new Set(tmux.sessions ?? [...tmux.panesByPid.values()].map((p) => p.session));
+}
+
+/** list-panes 출력의 모든 줄에서 세션 이름 — pane_pid 중복(linked window)에 덮어쓰이지 않는다 */
+export function parseTmuxSessionNames(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of text.split('\n')) {
+    const m = raw.match(/^\d+ @\d+ %\d+ \d+\/\$\d+ (.+)$/);
+    if (m) out.add(m[1]);
+  }
+  return out;
 }
 
 export const TMUX_PANES_FORMAT = '#{pane_pid} #{window_id} #{pane_id} #{pid}/#{session_id} #{session_name}';
@@ -202,6 +219,49 @@ export function autoAttachTargets(
     out.set(key, it.tmux);
   }
   return [...out.values()];
+}
+
+// ---- tmux ensure (설정 aiSessions.tmuxEnsure) ----
+export interface EnsureEntry { session: string; command: string; offFile?: string }
+export interface EnsureState {
+  terminalAlive: boolean;  // 이 항목으로 만든 터미널이 아직 살아 있음
+  startedAt?: number;      // 그 터미널을 만든 시각 — 유예 판정
+  lastAttemptAt?: number;  // 마지막 실행 시도 — 쿨다운 판정
+}
+export const ENSURE_GRACE_MS = 90_000;    // 명령 실행 뒤 세션이 나타나야 하는 시간(넘으면 터미널 정리·재시도)
+export const ENSURE_COOLDOWN_MS = 60_000; // 실패 뒤 재시도 간격 — 즉시 죽는 명령의 생성 루프 방지
+
+export function expandHome(p: string, home: string): string {
+  if (p === '~') return home;
+  return p.startsWith('~/') ? home + p.slice(1) : p;
+}
+
+/**
+ * 어떤 ensure 항목을 지금 실행할지. run = 세션이 없고(off 스위치 없음·살아있는 터미널 없음·쿨다운 지남),
+ * stale = 터미널은 살아 있는데 유예가 지나도 세션이 안 나타난 항목(호출부가 dispose 하고 쿨다운 뒤 재시도).
+ * 같은 세션 이름은 첫 항목만.
+ */
+export function ensureDue(
+  entries: ReadonlyArray<EnsureEntry>, live: ReadonlySet<string>,
+  state: ReadonlyMap<string, EnsureState>, now: number, exists: (p: string) => boolean,
+): { run: EnsureEntry[]; stale: string[] } {
+  const run: EnsureEntry[] = [];
+  const stale: string[] = [];
+  const seen = new Set<string>();
+  for (const e of entries) {
+    if (!e.session || !e.command || seen.has(e.session)) continue;
+    seen.add(e.session);
+    if (live.has(e.session)) continue;
+    if (e.offFile && exists(e.offFile)) continue;
+    const st = state.get(e.session);
+    if (st?.terminalAlive) {
+      if (st.startedAt !== undefined && now - st.startedAt > ENSURE_GRACE_MS) stale.push(e.session);
+      continue;
+    }
+    if (st?.lastAttemptAt !== undefined && now - st.lastAttemptAt < ENSURE_COOLDOWN_MS) continue;
+    run.push(e);
+  }
+  return { run, stale };
 }
 
 let tmuxBinary: string | undefined | null = null; // null = 미조회
@@ -357,13 +417,17 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
     }
     if (!ref) return { shellPid: undefined, terminalName: undefined };
     if (!tmux) return { shellPid: undefined, terminalName: undefined, tmux: ref };
-    const clientChains = (tmux.clientPidsBySession.get(ref.session) ?? [])
-      .map((c) => [c, ...ancestorChain(c, byPid)]);
+    const clientPids = tmux.clientPidsBySession.get(ref.session) ?? [];
+    const clientChains = clientPids.map((c) => [c, ...ancestorChain(c, byPid)]);
     for (const cc of clientChains) {
       const hit = cc.find((p) => shellPids.has(p));
       if (hit !== undefined) return { shellPid: hit, terminalName: shellPids.get(hit), tmux: ref };
     }
-    const keep = prevShellPid !== undefined && clientChains.some((cc) => cc.includes(prevShellPid));
+    // ps 스냅샷보다 늦게 붙은 클라이언트(byPid 에 없음)가 있으면 조상을 모른다 — 이번 pass 는 불확실.
+    // (main.sh 가 세션을 만들며 곧바로 attach 하는 기동 순간에 해제 확정→중복 attach 탭이 생기는 것 방지)
+    const unknownClient = clientPids.some((c) => !byPid.has(c));
+    const keep = unknownClient ||
+      (prevShellPid !== undefined && clientChains.some((cc) => cc.includes(prevShellPid)));
     return { shellPid: keep ? undefined : null, terminalName: undefined, tmux: ref };
   };
 
@@ -532,7 +596,10 @@ export class ProcessMapper {
     if (panes === undefined) return undefined;
     const clients = await run(['list-clients', '-F', TMUX_CLIENTS_FORMAT]);
     if (clients === undefined) return undefined;
-    return { panesByPid: parseTmuxPanes(panes), clientPidsBySession: parseTmuxClients(clients) };
+    return {
+      panesByPid: parseTmuxPanes(panes), clientPidsBySession: parseTmuxClients(clients),
+      sessions: parseTmuxSessionNames(panes),
+    };
   }
 
   async snapshot(): Promise<{ ok: boolean; byPid: Map<number, ProcInfo>; agents: ProcInfo[] }> {

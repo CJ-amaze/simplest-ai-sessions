@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   ancestorChain, detectAgent, PAIRING_FRESH_MS, parseForkParentSessionId, parsePsOutput,
-  autoAttachTargets, parseTmuxClients, parseTmuxPanes, parseTmuxTarget, REGISTER_GRACE_MS,
-  reconcileSessions, tmuxRefKey,
+  autoAttachTargets, ENSURE_COOLDOWN_MS, ENSURE_GRACE_MS, ensureDue, expandHome, parseTmuxClients,
+  parseTmuxPanes, parseTmuxSessionNames, parseTmuxTarget, REGISTER_GRACE_MS, reconcileSessions, tmuxRefKey,
+  tmuxSessions,
 } from '../src/mapper';
 import type { ReconcileInput } from '../src/mapper';
 
@@ -455,6 +456,15 @@ describe('tmux 파서', () => {
     expect(m.get('other')).toEqual([60000]);
     expect(m.has('cji-x')).toBe(false);
   });
+  it('parseTmuxSessionNames / tmuxSessions: linked window 로 같은 pane_pid 가 두 세션에 나와도 세션은 둘 다', () => {
+    const text = '1010 @1 %1 4000/$1 cji-main\n1010 @1 %1 4000/$2 view\n';
+    expect(parseTmuxSessionNames(text)).toEqual(new Set(['cji-main', 'view']));
+    expect(parseTmuxPanes(text).size).toBe(1); // 덮어써서 하나만 — 세션 목록으로 쓰면 안 되는 이유
+    expect(tmuxSessions({ panesByPid: parseTmuxPanes(text), clientPidsBySession: new Map(), sessions: parseTmuxSessionNames(text) }))
+      .toEqual(new Set(['cji-main', 'view']));
+    expect(tmuxSessions({ panesByPid: parseTmuxPanes(text), clientPidsBySession: new Map() })) // sessions 없으면 panes 에서 유도
+      .toEqual(new Set(['view']));
+  });
   it('parseTmuxTarget: 네이티브 바인딩 "session:@w.%p"', () => {
     expect(parseTmuxTarget('cji-main:@13.%13')).toEqual({ session: 'cji-main', target: 'cji-main:@13.%13' });
     expect(parseTmuxTarget(undefined)).toBeUndefined();
@@ -562,6 +572,14 @@ describe('reconcileSessions — tmux 경유 터미널 매핑', () => {
     }));
     expect(r.claims[0].tmux).toEqual(ref);
   });
+  it('ps 스냅샷보다 늦게 붙은 클라이언트(byPid 에 없음)가 있으면 해제 확정하지 않는다(undefined) — 기동 순간 중복 attach 방지', () => {
+    const r = reconcileSessions(makeInput({
+      agents: [claudeInTmux], byPid, shellPids: new Map([[600, 'zsh']]),
+      sessions: [sess('claude:a', { pid: 1020 })],
+      tmux: { panesByPid: panes, clientPidsBySession: new Map([['cji-x', [9999]]]) }, // 9999 는 ps 에 없음
+    }));
+    expect(r.claims[0]).toMatchObject({ shellPid: undefined, tmux: ref });
+  });
   it('orphanProcs: 플레이스홀더의 이전 shellPid 가 ps 상 클라이언트 조상이면 일시 실패에도 유지(undefined)', () => {
     const r = reconcileSessions(makeInput({
       agents: [claudeInTmux], byPid, shellPids: new Map(), tmux: attached,
@@ -606,5 +624,39 @@ describe('autoAttachTargets', () => {
   it('tmuxRefKey: id 우선, 없으면 이름', () => {
     expect(tmuxRefKey(a)).toBe('4000/$1');
     expect(tmuxRefKey({ session: 'x', target: 'x:@1.%1' })).toBe('name:x');
+  });
+});
+
+describe('ensureDue / expandHome (aiSessions.tmuxEnsure)', () => {
+  const main = { session: 'cji-main', command: '~/Desktop/CJI/tools/cji/main.sh', offFile: '/Users/cj/.cji/main.off' };
+  const no = () => false;
+  it('세션이 없고 상태도 없으면 실행', () => {
+    expect(ensureDue([main], new Set(), new Map(), T, no)).toEqual({ run: [main], stale: [] });
+  });
+  it('세션이 살아 있으면 아무것도 안 함', () => {
+    expect(ensureDue([main], new Set(['cji-main']), new Map(), T, no)).toEqual({ run: [], stale: [] });
+  });
+  it('off 스위치 파일이 있으면 건너뜀', () => {
+    expect(ensureDue([main], new Set(), new Map(), T, (p) => p === main.offFile)).toEqual({ run: [], stale: [] });
+  });
+  it('터미널이 살아 있고 유예 안이면 대기, 유예를 넘기면 stale', () => {
+    const st = new Map([['cji-main', { terminalAlive: true, startedAt: T, lastAttemptAt: T }]]);
+    expect(ensureDue([main], new Set(), st, T + ENSURE_GRACE_MS - 1, no)).toEqual({ run: [], stale: [] });
+    expect(ensureDue([main], new Set(), st, T + ENSURE_GRACE_MS + 1, no)).toEqual({ run: [], stale: ['cji-main'] });
+  });
+  it('터미널이 닫힌 뒤 쿨다운 안이면 대기, 지나면 다시 실행', () => {
+    const st = new Map([['cji-main', { terminalAlive: false, lastAttemptAt: T }]]);
+    expect(ensureDue([main], new Set(), st, T + ENSURE_COOLDOWN_MS - 1, no).run).toEqual([]);
+    expect(ensureDue([main], new Set(), st, T + ENSURE_COOLDOWN_MS + 1, no).run).toEqual([main]);
+  });
+  it('같은 세션 이름은 첫 항목만, session/command 빈 항목은 무시', () => {
+    const dup = { session: 'cji-main', command: 'other' };
+    expect(ensureDue([main, dup, { session: '', command: 'x' }], new Set(), new Map(), T, no).run).toEqual([main]);
+  });
+  it('expandHome: ~ 와 ~/ 만 확장', () => {
+    expect(expandHome('~/Desktop/CJI', '/Users/cj')).toBe('/Users/cj/Desktop/CJI');
+    expect(expandHome('~', '/Users/cj')).toBe('/Users/cj');
+    expect(expandHome('/abs/~/x', '/Users/cj')).toBe('/abs/~/x');
+    expect(expandHome('~user/x', '/Users/cj')).toBe('~user/x');
   });
 });

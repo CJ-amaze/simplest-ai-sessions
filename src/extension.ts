@@ -6,8 +6,11 @@ import * as vscode from 'vscode';
 import { AdapterWatcher, claudeSpec, codexSpec } from './adapters/watcher';
 import { EVENTS_FILE, parseHookEventLine, parseStatusLine, STATUS_FILE } from './hooks/events';
 import { installHooks, removeHooks, statusShimPath, writeShim } from './hooks/installer';
-import { autoAttachTargets, findTmux, ProcessMapper, reconcileSessions, tmuxRefKey } from './mapper';
-import type { ReconcileResult, TmuxInfo } from './mapper';
+import {
+  autoAttachTargets, ENSURE_GRACE_MS, ensureDue, expandHome, findTmux, ProcessMapper, reconcileSessions,
+  tmuxRefKey, tmuxSessions,
+} from './mapper';
+import type { EnsureEntry, EnsureState, ReconcileResult, TmuxInfo } from './mapper';
 import { SidebarProvider } from './sidebar';
 import { StateStore } from './store';
 import { TailReader } from './tail';
@@ -67,6 +70,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.window.onDidOpenTerminal(() => remap()),
     vscode.window.onDidCloseTerminal((t) => {
       forgetAttachTerminal(t);
+      forgetEnsureTerminal(t);
       remap();
     }),
   );
@@ -167,6 +171,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await doDrain().catch((e) => log(`priming drain: ${String(e).slice(0, 120)}`));
     await doRemap().catch((e) => log(`priming map: ${String(e).slice(0, 120)}`));
     log('priming 완료 (등록→이벤트→매핑)');
+    // 시작 레이아웃은 첫 매핑(ensure·자동 attach 가 터미널을 만든 뒤)에 이어서
+    await applyStartupLayout().catch((e) => log(`startup layout: ${String(e).slice(0, 120)}`));
   })();
 
   // 상태 tick (5s) — store 변경이 없어도 시간 경과(running→idle, 외부 exited)로
@@ -406,10 +412,8 @@ function forgetAttachTerminal(t: vscode.Terminal): void {
  */
 function reconcileAttachTerminals(r: ReconcileResult, tmux: TmuxInfo): void {
   const live = new Set<string>();
-  for (const p of tmux.panesByPid.values()) {
-    live.add(tmuxRefKey(p));
-    live.add(`name:${p.session}`);
-  }
+  for (const p of tmux.panesByPid.values()) live.add(tmuxRefKey(p));
+  for (const s of tmuxSessions(tmux)) live.add(`name:${s}`);
   for (const [key, term] of attachTerminals) {
     if (live.has(key)) continue;
     attachTerminals.delete(key);
@@ -421,15 +425,104 @@ function reconcileAttachTerminals(r: ReconcileResult, tmux: TmuxInfo): void {
   for (const ref of autoAttachTargets([...r.claims, ...r.orphanProcs], autoAttachAttempted)) {
     const key = tmuxRefKey(ref);
     if (!live.has(key)) continue; // 사라진 세션을 가리키는 stale 바인딩 — attach 실패→억제 해제→재시도 루프 방지
+    if (ensureTerminals.has(ref.session)) continue; // ensure 가 띄운 터미널(main.sh)이 곧 붙는다 — 중복 탭 방지
     autoAttachAttempted.add(key);
     ensureAttachTerminal(ref, false);
   }
+}
+
+// ---- tmux ensure (설정 aiSessions.tmuxEnsure) ----
+// "이 tmux 세션이 없으면 이 명령을 새 터미널에서 실행" — CJ 의 관제 세션 cji-main 을 main.sh 로 상시 보장하는 데 쓴다.
+// Desktop 아래 스크립트는 launchd 가 못 읽으므로(TCC) VS Code 터미널에서 실행한다. 명령은 멱등이어야 한다.
+const ensureTerminals = new Map<string, vscode.Terminal>();
+const ensureState = new Map<string, EnsureState>();
+
+function ensureEntries(): EnsureEntry[] {
+  const raw = vscode.workspace.getConfiguration('aiSessions').get<unknown>('tmuxEnsure', []);
+  if (!Array.isArray(raw)) return [];
+  const home = os.homedir();
+  const out: EnsureEntry[] = [];
+  for (const it of raw) {
+    if (!it || typeof it !== 'object') continue;
+    const { session, command, offFile } = it as Record<string, unknown>;
+    if (typeof session !== 'string' || typeof command !== 'string') continue;
+    out.push({
+      session, command: expandHome(command, home),
+      offFile: typeof offFile === 'string' && offFile ? expandHome(offFile, home) : undefined,
+    });
+  }
+  return out;
+}
+
+/** 매핑 pass 뒤(tmux 조회 성공 시에만) — 없는 세션은 명령 실행, 유예 넘긴 터미널은 정리 */
+function reconcileEnsuredSessions(tmux: TmuxInfo): void {
+  const entries = ensureEntries();
+  if (entries.length === 0) return;
+  const live = tmuxSessions(tmux);
+  const now = Date.now();
+  const { run, stale } = ensureDue(entries, live, ensureState, now, (p) => fs.existsSync(p));
+  for (const session of stale) {
+    const term = ensureTerminals.get(session);
+    ensureTerminals.delete(session); // onDidCloseTerminal 이 상태를 덮어쓰지 않도록 먼저 맵에서 뺀다
+    term?.dispose();
+    ensureState.set(session, { terminalAlive: false, lastAttemptAt: now });
+    log(`tmux ensure: ${session} 이 ${ENSURE_GRACE_MS / 1000}s 안에 나타나지 않음 — 터미널 정리, 쿨다운 뒤 재시도`);
+  }
+  for (const e of run) {
+    const shell = process.env.SHELL || '/bin/zsh';
+    // 로그인 셸 경유로 PATH 확보. 포커스는 훔치지 않는다. isTransient — reload 때 복원하지 않음(재실행 여지 차단)
+    const term = vscode.window.createTerminal({
+      name: e.session, shellPath: shell, shellArgs: ['-lc', e.command], isTransient: true,
+    });
+    ensureTerminals.set(e.session, term);
+    ensureState.set(e.session, { terminalAlive: true, startedAt: now, lastAttemptAt: now });
+    log(`tmux ensure: ${e.session} 없음 → ${shell} -lc ${e.command}`);
+  }
+}
+
+function forgetEnsureTerminal(t: vscode.Terminal): void {
+  for (const [session, term] of ensureTerminals) {
+    if (term !== t) continue;
+    ensureTerminals.delete(session);
+    // 세션이 죽어 tmux 클라이언트가 끝난 정상 종료든 기동 실패든, 재시도 여부는 쿨다운(lastAttemptAt)이 결정
+    ensureState.set(session, { terminalAlive: false, lastAttemptAt: ensureState.get(session)?.lastAttemptAt });
+    log(`tmux ensure terminal closed: ${session} exit=${t.exitStatus?.code ?? '?'}`);
+  }
+}
+
+// ---- 시작 레이아웃 (설정 aiSessions.startupLayout.*) — 창 로드·reload 마다 activate 에서 한 번 ----
+async function applyStartupLayout(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration('aiSessions');
+  if (!cfg.get<boolean>('startupLayout.enabled', false)) return;
+  for (const c of cfg.get<unknown[]>('startupLayout.commands', [])) {
+    if (typeof c !== 'string' || !c) continue;
+    try {
+      await vscode.commands.executeCommand(c);
+      log(`startup layout: ${c}`);
+    } catch (e) {
+      log(`startup layout: ${c} 실패 — ${String(e).slice(0, 120)}`);
+    }
+  }
+  const name = cfg.get<string>('startupLayout.focusTerminal', '');
+  if (!name) return;
+  // ensure(main.sh)·자동 attach 가 만든 터미널은 몇 초 뒤에 생길 수 있다 — 최대 30초 기다린다
+  for (let i = 0; i < 30; i++) {
+    const t = vscode.window.terminals.find((x) => x.name === name);
+    if (t) {
+      t.show();
+      log(`startup layout: terminal "${name}" focus`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  log(`startup layout: terminal "${name}" 30s 안에 없음`);
 }
 
 async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWatcher: AdapterWatcher): Promise<void> {
   // grace 판정 기준 시각은 pass 시작 시각 — 스냅샷 후 lsof가 오래 걸려도 그 사이 등록된
   // 세션이 "grace 만료"로 오판되지 않도록 (스냅샷에 없는 프로세스의 세션 보호)
   const passStartedAt = Date.now();
+  latestPassStartedAt = passStartedAt;
   const snap = await mapper.snapshot();
   if (!snap.ok) return; // ps 실패 — 생사 판정 근거 없음, 이번 pass 전체 skip
 
@@ -476,7 +569,12 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   store.syncPlaceholders(
     r.orphanProcs.map((o) => ({ ...o, tmux: o.tmux ?? (tmux ? null : undefined) })), passStartedAt,
   );
-  if (tmux) reconcileAttachTerminals(r, tmux);
+  // 60초 넘게 멈춘 pass 가 새 pass 뒤에 재개되면 이 스냅샷은 옛것 — 터미널을 만들거나 지우는 부작용은 건너뛴다
+  // (옛 빈 스냅샷으로 방금 뜬 세션의 ensure 터미널을 stale 로 오판·dispose 하는 것 방지)
+  if (tmux && passStartedAt === latestPassStartedAt) {
+    reconcileEnsuredSessions(tmux);   // 먼저 — 방금 띄운 main.sh 터미널이 있으면 자동 attach 가 그 세션을 건너뛴다
+    reconcileAttachTerminals(r, tmux);
+  }
   // 세션이 붙지 않은 일반 터미널도 목록에 — "+ New Terminal" 직후 바로 보이도록
   const used = store.usedShellPids();
   const plain: Array<{ name?: string; shellPid: number }> = [];
@@ -490,6 +588,8 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
 let sidebar: SidebarProvider | undefined;
 /** attach 직후 매핑을 앞당기기 위한 remap 트리거 — activate에서 주입 */
 let requestRemap: (() => void) | undefined;
+/** 가장 최근에 시작한 매핑 pass 의 시각 — 지연 재개된 옛 pass 의 부작용 차단용 */
+let latestPassStartedAt = 0;
 
 async function focusTerminalByShellPid(shellPid: number): Promise<void> {
   (await findTerminal(shellPid))?.show();
