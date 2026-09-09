@@ -4,17 +4,18 @@ import { EVENTS_DIR, TERMNO_FILE } from './hooks/events';
 import { renderCards, renderShell } from './render';
 import type { PlainTerminal } from './render';
 import type { StateStore } from './store';
+import { assignTermNumbers, pickPinnedShellPid } from './termno';
+import type { TermNoState } from './termno';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   static readonly viewId = 'aiSessions.sidebar';
   private view?: vscode.WebviewView;
   private activeShellPid?: number;
   private terminals: PlainTerminal[] = [];
-  // 터미널 번호: shellPid 최초 등장 순서로 부여, 창이 사는 동안 고정.
-  // 사라진 pid 는 다음 렌더에서 폐기한다 — OS 의 pid 재사용이 옛 번호를
-  // 물려주지 않게 (codex 리뷰). 리로드 시 1부터 다시 시작(허용).
-  private termNo = new Map<number, number>();
-  private termNoNext = 1;
+  // 터미널 번호: shellPid 최초 등장 순서로 부여, 창이 사는 동안 고정. 사라진 pid 는 폐기, 번호 재사용 없음.
+  // 설정 aiSessions.pinnedTerminal 의 터미널(관제 세션)은 #1 예약. 규칙은 termno.ts.
+  private termNoState: TermNoState = { no: new Map<number, number>(), next: 1 };
+  private get termNo(): Map<number, number> { return this.termNoState.no; }
   private lastTermNoJson?: string;
 
   constructor(
@@ -55,16 +56,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   refresh(): void {
     const views = this.store.list(Date.now());
-    // 번호 배정/폐기 — 현재 보이는 shellPid(세션 카드 + 일반 터미널 행)만 살린다
+    // 번호 배정/폐기 — 현재 보이는 shellPid(세션 카드 + 일반 터미널 행)만 살린다. 핀 터미널은 #1
     const alive = new Set<number>();
     for (const v of views) if (v.shellPid !== undefined) alive.add(v.shellPid);
     for (const t of this.terminals) alive.add(t.shellPid);
-    for (const pid of alive) {
-      if (!this.termNo.has(pid)) this.termNo.set(pid, this.termNoNext++);
-    }
-    for (const pid of [...this.termNo.keys()]) {
-      if (!alive.has(pid)) this.termNo.delete(pid);
-    }
+    const pinnedName = vscode.workspace.getConfiguration('aiSessions').get<string>('pinnedTerminal', '');
+    const pinned = pickPinnedShellPid(pinnedName, views, this.terminals);
+    assignTermNumbers(this.termNoState, alive, pinned, pinnedName !== '');
 
     // 소비자: ~/.claude/widget-ding.sh (책상 위젯 뱃지).
     // 여러 VS Code 창에서는 마지막 writer가 이긴다(문서화된 제한).

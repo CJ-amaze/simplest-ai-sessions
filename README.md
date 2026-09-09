@@ -21,6 +21,7 @@ One sidebar that shows every [Claude Code](https://claude.com/claude-code) and [
 
 - **Honest statuses.** The rule is simple: *if you can type into the terminal right now, it's `Idle` (or `Needs approval`) — everything else is `Working`.* Long silent tool runs, remote MCP calls, extended thinking: still `Working`. When a turn ends, it drops to `Idle`. On recent Claude Code versions the extension reads Claude Code's own busy/idle state directly.
 - **Needs-approval badge.** Sessions waiting on a permission prompt are highlighted, and the sidebar badge counts them — no more discovering an agent has been blocked for 20 minutes.
+- **Pinned #1.** `aiSessions.pinnedTerminal` names the terminal that always gets badge #1 and sorts first (your control session); everything else is numbered from 2.
 - **Fixed session name.** A session started with `claude -n <name>` shows that name as its own line on the card (the topic line below still follows the latest prompt).
 - **Click a card → focus its terminal.** The card for the currently active terminal is highlighted.
 - **Cards = live processes.** Dead sessions, resume leftovers, and bootstrap ghosts never show. A freshly opened `codex` that hasn't received its first query yet shows as a placeholder card.

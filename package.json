@@ -2,7 +2,7 @@
   "name": "simplest-ai-sessions",
   "displayName": "Simplest AI Sessions",
   "description": "The simplest AI session manager for VS Code — a local, passive monitor for Claude Code & Codex CLI sessions. No API keys, no LLM calls.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "publisher": "cj-amaze",
   "private": true,
   "license": "MIT",
@@ -102,6 +102,11 @@
           "type": "string",
           "default": "",
           "description": "Terminal name to show and focus after the startup commands (waits up to 30s for it to appear). Empty = none."
+        },
+        "aiSessions.pinnedTerminal": {
+          "type": "string",
+          "default": "",
+          "description": "Terminal name that always gets badge #1 and sorts first (e.g. your control session's tmux attach terminal). When set, other terminals are numbered from 2 so #1 never moves."
         },
         "aiSessions.startupLayout.closeIdleTerminals": {
           "type": "boolean",
