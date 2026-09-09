@@ -1,7 +1,7 @@
 import { REGISTER_GRACE_MS } from './mapper';
 import { computeStatus } from './status';
 import type {
-  AgentKind, HookEvent, MappingConfidence, SessionPatch, SessionState, SessionView,
+  AgentKind, HookEvent, MappingConfidence, SessionPatch, SessionState, SessionView, TmuxRef,
 } from './types';
 
 export const PRUNE_AFTER_MS = 5 * 60_000;
@@ -56,6 +56,7 @@ export class StateStore {
       next.registeredAt = now;    // grace도 재시작
       next.terminalName = undefined; // 이전 터미널 잔재 — 새 매핑이 다시 채움
       next.shellPid = undefined;
+      next.tmux = undefined;
     }
     this.sessions.set(key, next);
     this.emit();
@@ -94,7 +95,10 @@ export class StateStore {
     key: string,
     info: {
       pid?: number; alive?: boolean; mapping?: MappingConfidence;
-      terminalName?: string; shellPid?: number; parentKey?: string | null;
+      terminalName?: string;
+      shellPid?: number | null;  // null = 터미널 연결 해제 확정 → shellPid·terminalName 삭제
+      tmux?: TmuxRef | null;     // null = tmux 경유 아님 → 해제
+      parentKey?: string | null;
       busy?: boolean;
       nativeStatus?: 'busy' | 'idle' | null; // null = 파일 사라짐 → 해제
     },
@@ -108,7 +112,12 @@ export class StateStore {
     else if (info.nativeStatus !== undefined) s.nativeStatus = info.nativeStatus;
     if (info.mapping !== undefined) s.mapping = info.mapping;
     if (info.terminalName !== undefined) s.terminalName = info.terminalName;
-    if (info.shellPid !== undefined) s.shellPid = info.shellPid;
+    if (info.shellPid === null) {
+      s.shellPid = undefined;
+      s.terminalName = undefined;
+    } else if (info.shellPid !== undefined) s.shellPid = info.shellPid;
+    if (info.tmux === null) s.tmux = undefined;
+    else if (info.tmux !== undefined) s.tmux = info.tmux;
     if (info.parentKey === null) s.parentKey = undefined;
     else if (info.parentKey !== undefined) s.parentKey = info.parentKey;
     if (info.alive !== undefined) {
@@ -132,6 +141,15 @@ export class StateStore {
     return this.sessions.get(key);
   }
 
+  /** 플레이스홀더의 현재 shellPid (pid → shellPid) — reconcile 이 일시 실패 때 유지 판단에 쓴다 */
+  placeholderShellPids(): Map<number, number> {
+    const out = new Map<number, number>();
+    for (const s of this.sessions.values()) {
+      if (s.key.includes(':pending-') && s.pid !== undefined && s.shellPid !== undefined) out.set(s.pid, s.shellPid);
+    }
+    return out;
+  }
+
   /** 살아있는 세션(플레이스홀더 포함)이 점유한 VS Code 터미널 shell pid 집합 */
   usedShellPids(): Set<number> {
     const out = new Set<number>();
@@ -147,7 +165,8 @@ export class StateStore {
    */
   syncPlaceholders(
     orphans: Array<{
-      agent: AgentKind; pid: number; terminalName?: string; shellPid?: number;
+      agent: AgentKind; pid: number; terminalName?: string; shellPid?: number | null;
+      tmux?: TmuxRef | null; // null = tmux 경유 아님(해제), undefined = 불확실(유지)
       parentKey: string | null;
       topic?: string; // 네이티브 바인딩의 세션 이름 (bg 서브에이전트 등)
     }>,
@@ -184,7 +203,17 @@ export class StateStore {
         s.topic = o.topic;
         changed = true;
       }
-      if (o.shellPid !== undefined) s.shellPid = o.shellPid;
+      if (o.shellPid === null) {
+        if (s.shellPid !== undefined) changed = true;
+        s.shellPid = undefined;
+        s.terminalName = undefined;
+      } else if (o.shellPid !== undefined) s.shellPid = o.shellPid;
+      if (o.tmux === null) {
+        if (s.tmux !== undefined) { s.tmux = undefined; changed = true; }
+      } else if (o.tmux !== undefined && (s.tmux?.target !== o.tmux.target || s.tmux?.id !== o.tmux.id)) {
+        s.tmux = o.tmux; // id 보충(네이티브 폴백 → 조회 성공)도 갱신 — 클릭·자동 attach 가 같은 키를 쓰도록
+        changed = true;
+      }
       const parent = o.parentKey ?? undefined;
       if (s.parentKey !== parent) { s.parentKey = parent; changed = true; }
       this.sessions.set(key, s);

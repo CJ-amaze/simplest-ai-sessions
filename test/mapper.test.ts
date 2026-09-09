@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   ancestorChain, detectAgent, PAIRING_FRESH_MS, parseForkParentSessionId, parsePsOutput,
-  REGISTER_GRACE_MS, reconcileSessions,
+  autoAttachTargets, parseTmuxClients, parseTmuxPanes, parseTmuxTarget, REGISTER_GRACE_MS,
+  reconcileSessions, tmuxRefKey,
 } from '../src/mapper';
 import type { ReconcileInput } from '../src/mapper';
 
@@ -437,5 +438,173 @@ describe('reconcileSessions', () => {
       sessions: [sess('claude:a', { pid: 700 })],
     }));
     expect(r.claims[0]).toMatchObject({ shellPid: 600, terminalName: 'zsh — xr-merch' });
+  });
+});
+
+// ── tmux (2026-09-08) ─────────────────────────────────────────────
+
+describe('tmux 파서', () => {
+  it('parseTmuxPanes: pane_pid → 세션·타겟, 세션 이름의 공백 보존', () => {
+    const m = parseTmuxPanes('40227 @13 %13 21781/$13 cji-main\n53208 @15 %15 21781/$15 my session\n');
+    expect(m.get(40227)).toEqual({ session: 'cji-main', target: 'cji-main:@13.%13', id: '21781/$13' });
+    expect(m.get(53208)).toEqual({ session: 'my session', target: 'my session:@15.%15', id: '21781/$15' });
+  });
+  it('parseTmuxClients: 세션별 클라이언트 pid 목록', () => {
+    const m = parseTmuxClients('40223 cji-main\n50000 cji-main\n60000 other\n');
+    expect(m.get('cji-main')).toEqual([40223, 50000]);
+    expect(m.get('other')).toEqual([60000]);
+    expect(m.has('cji-x')).toBe(false);
+  });
+  it('parseTmuxTarget: 네이티브 바인딩 "session:@w.%p"', () => {
+    expect(parseTmuxTarget('cji-main:@13.%13')).toEqual({ session: 'cji-main', target: 'cji-main:@13.%13' });
+    expect(parseTmuxTarget(undefined)).toBeUndefined();
+    expect(parseTmuxTarget('garbage')).toBeUndefined();
+  });
+});
+
+describe('reconcileSessions — tmux 경유 터미널 매핑', () => {
+  // 실측 트리: VS Code(500) → zsh(600) → tmux client(610) / tmux server(1000, ppid 1) → pane 셸(1010) → claude(1020)
+  const server = { pid: 1000, ppid: 1, pcpu: 0, command: 'tmux new-session -d -s cji-x' };
+  const paneShell = { pid: 1010, ppid: 1000, pcpu: 0, command: '/bin/bash _session.sh' };
+  const claudeInTmux = { pid: 1020, ppid: 1010, pcpu: 0, command: 'claude -n x' };
+  const vsShell = { pid: 600, ppid: 500, pcpu: 0, command: '/bin/zsh -il' };
+  const client = { pid: 610, ppid: 600, pcpu: 0, command: 'tmux attach-session -t =cji-x' };
+  const byPid = new Map([server, paneShell, claudeInTmux, vsShell, client].map((p) => [p.pid, p]));
+  const panes = parseTmuxPanes('1010 @1 %1 4000/$7 cji-x');
+  const ref = { session: 'cji-x', target: 'cji-x:@1.%1', id: '4000/$7' };
+  const attached = { panesByPid: panes, clientPidsBySession: new Map([['cji-x', [610]]]) };
+  const detached = { panesByPid: panes, clientPidsBySession: new Map<string, number[]>() };
+
+  it('붙은 tmux: 클라이언트 조상 체인의 VS Code 셸을 shellPid 로, terminalName·tmux 전달', () => {
+    const r = reconcileSessions(makeInput({
+      agents: [claudeInTmux], byPid, shellPids: new Map([[600, 'tmux']]),
+      sessions: [sess('claude:a', { pid: 1020 })], tmux: attached,
+    }));
+    expect(r.claims[0]).toMatchObject({ shellPid: 600, terminalName: 'tmux', tmux: ref });
+  });
+  it('shellPath 로 tmux 를 직접 띄운 터미널: processId 가 클라이언트 자신 — 자기 pid 로 히트', () => {
+    const r = reconcileSessions(makeInput({
+      agents: [claudeInTmux], byPid, shellPids: new Map([[610, 'cji-x']]),
+      sessions: [sess('claude:a', { pid: 1020 })], tmux: attached,
+    }));
+    expect(r.claims[0]).toMatchObject({ shellPid: 610, terminalName: 'cji-x', tmux: ref });
+  });
+  it('pane 에서 exec 된 claude(pane_pid == claude 자신)도 세션을 찾는다', () => {
+    const execd = { pid: 1010, ppid: 1000, pcpu: 0, command: 'claude -n main' };
+    const r = reconcileSessions(makeInput({
+      agents: [execd], byPid: new Map([[1000, server], [1010, execd], [600, vsShell], [610, client]]),
+      shellPids: new Map([[600, 'tmux']]),
+      sessions: [sess('claude:a', { pid: 1010 })], tmux: attached,
+    }));
+    expect(r.claims[0]).toMatchObject({ shellPid: 600, tmux: ref });
+  });
+  it('detached(클라이언트 0개): shellPid null(해제 확정) + tmux 유지 — 카드는 tmux 칩, 클릭은 attach', () => {
+    const r = reconcileSessions(makeInput({
+      agents: [claudeInTmux], byPid, shellPids: new Map([[600, 'zsh']]),
+      sessions: [sess('claude:a', { pid: 1020, shellPid: 600 })], tmux: detached,
+    }));
+    expect(r.claims[0]).toMatchObject({ shellPid: null, terminalName: undefined, tmux: ref });
+  });
+  it('클라이언트가 VS Code 밖(iTerm)에만 남음: 이전 shellPid 가 어느 클라이언트의 조상도 아니면 해제 확정', () => {
+    const iterm = { pid: 900, ppid: 1, pcpu: 0, command: 'tmux attach -t cji-x' };
+    const r = reconcileSessions(makeInput({
+      agents: [claudeInTmux], byPid: new Map([...byPid, [900, iterm]]),
+      shellPids: new Map([[600, 'zsh']]),
+      sessions: [sess('claude:a', { pid: 1020, shellPid: 600 })],
+      tmux: { panesByPid: panes, clientPidsBySession: new Map([['cji-x', [900]]]) },
+    }));
+    expect(r.claims[0].shellPid).toBeNull();
+  });
+  it('일시 실패(processId 미응답으로 shellPids 에 빠짐): 이전 shellPid 가 ps 상 클라이언트 조상이면 유지(undefined)', () => {
+    const r = reconcileSessions(makeInput({
+      agents: [claudeInTmux], byPid, shellPids: new Map(),
+      sessions: [sess('claude:a', { pid: 1020, shellPid: 600 })], tmux: attached,
+    }));
+    expect(r.claims[0]).toMatchObject({ shellPid: undefined, tmux: ref });
+  });
+  it('tmux 조회 실패(input.tmux 없음): 네이티브 tmux 타겟으로 칩만 붙이고 shellPid 는 불확실(undefined)', () => {
+    const r = reconcileSessions(makeInput({
+      agents: [claudeInTmux], byPid, shellPids: new Map([[600, 'zsh']]),
+      sessions: [sess('claude:a', { pid: 1020, shellPid: 600 })],
+      nativeBindings: new Map([[1020, { sessionId: 'a', tmux: 'cji-x:@1.%1' }]]),
+    }));
+    expect(r.claims[0]).toMatchObject({ shellPid: undefined, tmux: { session: 'cji-x', target: 'cji-x:@1.%1' } });
+  });
+  it('네이티브 tmux 타겟 폴백: 체인이 pane 에 안 닿아도(재부모화) 클라이언트로 VS Code 셸을 찾는다', () => {
+    const reparented = { pid: 1020, ppid: 1, pcpu: 0, command: 'claude' };
+    const r = reconcileSessions(makeInput({
+      agents: [reparented], byPid: new Map([[1020, reparented], [600, vsShell], [610, client]]),
+      shellPids: new Map([[600, 'tmux']]),
+      sessions: [sess('claude:a', { pid: 1020 })],
+      nativeBindings: new Map([[1020, { sessionId: 'a', tmux: 'cji-x:@1.%1' }]]),
+      tmux: { panesByPid: new Map(), clientPidsBySession: new Map([['cji-x', [610]]]) },
+    }));
+    expect(r.claims[0]).toMatchObject({ shellPid: 600, tmux: { session: 'cji-x', target: 'cji-x:@1.%1' } });
+    expect(r.claims[0].tmux?.id).toBeUndefined();
+  });
+  it('네이티브 tmux 타겟 폴백: 이름만 같고 window/pane 이 다른 pane 은 id 를 빌려주지 않는다 (재사용된 이름)', () => {
+    const reparented = { pid: 1020, ppid: 1, pcpu: 0, command: 'claude' };
+    const r = reconcileSessions(makeInput({
+      agents: [reparented], byPid: new Map([[1020, reparented]]),
+      sessions: [sess('claude:a', { pid: 1020 })],
+      nativeBindings: new Map([[1020, { sessionId: 'a', tmux: 'cji-x:@9.%9' }]]),
+      tmux: detached,
+    }));
+    expect(r.claims[0].tmux).toEqual({ session: 'cji-x', target: 'cji-x:@9.%9' });
+  });
+  it('네이티브 tmux 타겟 폴백: 같은 window/pane 이 있으면 id 를 보충한다', () => {
+    const reparented = { pid: 1020, ppid: 1, pcpu: 0, command: 'claude' };
+    const r = reconcileSessions(makeInput({
+      agents: [reparented], byPid: new Map([[1020, reparented]]),
+      sessions: [sess('claude:a', { pid: 1020 })],
+      nativeBindings: new Map([[1020, { sessionId: 'a', tmux: 'cji-x:@1.%1' }]]),
+      tmux: detached,
+    }));
+    expect(r.claims[0].tmux).toEqual(ref);
+  });
+  it('orphanProcs: 플레이스홀더의 이전 shellPid 가 ps 상 클라이언트 조상이면 일시 실패에도 유지(undefined)', () => {
+    const r = reconcileSessions(makeInput({
+      agents: [claudeInTmux], byPid, shellPids: new Map(), tmux: attached,
+      placeholderShellPids: new Map([[1020, 600]]),
+    }));
+    expect(r.orphanProcs[0]).toMatchObject({ pid: 1020, shellPid: undefined, tmux: ref });
+  });
+  it('orphanProcs(세션 파일 전)도 tmux 위치를 전달한다', () => {
+    const r = reconcileSessions(makeInput({
+      agents: [claudeInTmux], byPid, shellPids: new Map(), tmux: detached,
+    }));
+    expect(r.orphanProcs[0]).toMatchObject({ pid: 1020, shellPid: null, tmux: ref });
+  });
+  it('비-tmux 프로세스는 tmux 정보가 있어도 영향 없음 (회귀)', () => {
+    const proc = { pid: 700, ppid: 600, pcpu: 0, command: 'claude' };
+    const r = reconcileSessions(makeInput({
+      agents: [proc], byPid: new Map([[600, vsShell], [700, proc]]),
+      shellPids: new Map([[600, 'zsh']]),
+      sessions: [sess('claude:a', { pid: 700 })], tmux: detached,
+    }));
+    expect(r.claims[0]).toMatchObject({ shellPid: 600, terminalName: 'zsh' });
+    expect(r.claims[0].tmux).toBeUndefined();
+  });
+});
+
+describe('autoAttachTargets', () => {
+  const a = { session: 'cji-a', target: 'cji-a:@1.%1', id: '4000/$1' };
+  const b = { session: 'cji-b', target: 'cji-b:@2.%2', id: '4000/$2' };
+  it('이 창에 터미널 없음이 확정된(shellPid null) 세션만 — number(붙음)·undefined(불확실)는 제외', () => {
+    expect(autoAttachTargets([
+      { tmux: a, shellPid: null }, { tmux: b, shellPid: 600 },
+      { tmux: { ...b, id: '4000/$3', session: 'cji-c' }, shellPid: undefined },
+      { shellPid: null },
+    ], new Set())).toEqual([a]);
+  });
+  it('같은 세션의 여러 프로세스(서브에이전트)는 1개, attempted(사용자가 닫은 탭)는 제외', () => {
+    expect(autoAttachTargets(
+      [{ tmux: a, shellPid: null }, { tmux: a, shellPid: null }, { tmux: b, shellPid: null }],
+      new Set([tmuxRefKey(b)]),
+    )).toEqual([a]);
+  });
+  it('tmuxRefKey: id 우선, 없으면 이름', () => {
+    expect(tmuxRefKey(a)).toBe('4000/$1');
+    expect(tmuxRefKey({ session: 'x', target: 'x:@1.%1' })).toBe('name:x');
   });
 });

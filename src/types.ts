@@ -2,6 +2,13 @@ export type AgentKind = 'claude' | 'codex';
 export type Status = 'running' | 'approval' | 'idle' | 'exited';
 export type MappingConfidence = 'exact' | 'heuristic' | 'none';
 
+/** tmux 안에서 도는 프로세스의 위치 */
+export interface TmuxRef {
+  session: string;          // tmux 세션 이름 (attach 대상)
+  target: string;           // "session:@window.%pane" — select-window / select-pane 타겟
+  id?: string;              // "#{pid}/#{session_id}" ("21781/$3") — 서버 재시작·이름 재사용과 구분되는 식별자. 네이티브 폴백엔 없을 수 있음
+}
+
 /** 어댑터/훅이 갱신 가능한 세션 필드 (식별자 제외) */
 export interface SessionFields {
   cwd?: string;
@@ -57,6 +64,7 @@ export interface SessionState extends Required<Pick<SessionFields, 'lastActivity
   parentKey?: string;       // 부모 세션 key (다른 agent 프로세스가 띄운 서브에이전트)
   terminalName?: string;    // 표시 전용 — 이름은 중복 가능하므로 포커스 식별자로 쓰지 말 것
   shellPid?: number;        // 매핑된 VS Code 터미널의 shell pid (포커스 식별용)
+  tmux?: TmuxRef;           // tmux 경유 세션. shellPid 가 없으면 이 창엔 붙은 클라이언트가 없음 → 클릭 시 attach
 }
 
 export interface SessionPatch {

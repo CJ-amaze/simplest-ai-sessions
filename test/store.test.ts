@@ -265,3 +265,66 @@ describe('StateStore', () => {
     expect(n).toBe(1);
   });
 });
+
+describe('tmux (2026-09-08)', () => {
+  const ref = { session: 'cji-x', target: 'cji-x:@1.%1' };
+  it('setProcess: tmux 저장 / shellPid null → shellPid·terminalName 해제 / undefined 는 유지 / tmux null → 해제', () => {
+    const s = new StateStore();
+    patch(s, 'a', T);
+    s.setProcess('claude:a', { alive: true, shellPid: 600, terminalName: 'tmux', tmux: ref });
+    expect(s.find('claude:a')).toMatchObject({ shellPid: 600, terminalName: 'tmux', tmux: ref });
+    s.setProcess('claude:a', { shellPid: undefined });
+    expect(s.find('claude:a')?.shellPid).toBe(600);
+    s.setProcess('claude:a', { shellPid: null });
+    expect(s.find('claude:a')?.shellPid).toBeUndefined();
+    expect(s.find('claude:a')?.terminalName).toBeUndefined();
+    expect(s.find('claude:a')?.tmux).toEqual(ref);
+    s.setProcess('claude:a', { tmux: null });
+    expect(s.find('claude:a')?.tmux).toBeUndefined();
+  });
+  it('usedShellPids: detach 로 해제된 세션은 터미널을 점유하지 않는다 (빈 터미널 행 dedupe 와 일관)', () => {
+    const s = new StateStore();
+    patch(s, 'a', T);
+    s.setProcess('claude:a', { alive: true, shellPid: 600, tmux: ref });
+    expect(s.usedShellPids().has(600)).toBe(true);
+    s.setProcess('claude:a', { shellPid: null });
+    expect(s.usedShellPids().has(600)).toBe(false);
+  });
+  it('플레이스홀더도 tmux 전달·해제', () => {
+    const s = new StateStore();
+    s.syncPlaceholders([{ agent: 'claude', pid: 800, parentKey: null, shellPid: 600, tmux: ref }], T);
+    expect(s.find('claude:pending-800')).toMatchObject({ shellPid: 600, tmux: ref });
+    s.syncPlaceholders([{ agent: 'claude', pid: 800, parentKey: null, shellPid: null, tmux: ref }], T + 100);
+    expect(s.find('claude:pending-800')?.shellPid).toBeUndefined();
+    expect(s.find('claude:pending-800')?.tmux).toEqual(ref);
+  });
+  it('플레이스홀더 tmux 3값: undefined 유지 / null 해제 / id 보충은 갱신', () => {
+    const s = new StateStore();
+    const noId = { session: 'cji-x', target: 'cji-x:@1.%1' };
+    s.syncPlaceholders([{ agent: 'codex', pid: 800, parentKey: null, tmux: noId }], T);
+    s.syncPlaceholders([{ agent: 'codex', pid: 800, parentKey: null }], T + 100); // 조회 실패 pass
+    expect(s.find('codex:pending-800')?.tmux).toEqual(noId);
+    s.syncPlaceholders([{ agent: 'codex', pid: 800, parentKey: null, tmux: ref }], T + 200); // id 보충
+    expect(s.find('codex:pending-800')?.tmux).toEqual(ref);
+    s.syncPlaceholders([{ agent: 'codex', pid: 800, parentKey: null, tmux: null }], T + 300);
+    expect(s.find('codex:pending-800')?.tmux).toBeUndefined();
+  });
+  it('placeholderShellPids: 플레이스홀더의 pid → shellPid 만', () => {
+    const s = new StateStore();
+    patch(s, 'a', T);
+    s.setProcess('claude:a', { alive: true, pid: 700, shellPid: 500 });
+    s.syncPlaceholders([
+      { agent: 'codex', pid: 800, parentKey: null, shellPid: 600 },
+      { agent: 'codex', pid: 900, parentKey: null },
+    ], T);
+    expect([...s.placeholderShellPids()]).toEqual([[800, 600]]);
+  });
+  it('부활 시 tmux 도 초기화', () => {
+    const s = new StateStore();
+    patch(s, 'a', T);
+    s.setProcess('claude:a', { alive: true, tmux: ref });
+    s.setProcess('claude:a', { alive: false }, T + 1000);
+    patch(s, 'a', T + 2000);
+    expect(s.find('claude:a')?.tmux).toBeUndefined();
+  });
+});

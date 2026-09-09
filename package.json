@@ -2,7 +2,7 @@
   "name": "simplest-ai-sessions",
   "displayName": "Simplest AI Sessions",
   "description": "The simplest AI session manager for VS Code — a local, passive monitor for Claude Code & Codex CLI sessions. No API keys, no LLM calls.",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "publisher": "cj-amaze",
   "private": true,
   "license": "MIT",
@@ -48,7 +48,17 @@
         "command": "aiSessions.removeHooks",
         "title": "AI Sessions: Remove hooks"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "AI Sessions",
+      "properties": {
+        "aiSessions.tmuxAutoAttach": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically open a terminal attached to any tmux session that hosts a Claude/Codex session and currently has no client attached. Closing that terminal only detaches; the tab is not re-opened for the same tmux session unless the session is re-created."
+        }
+      }
+    }
   },
   "scripts": {
     "build": "node esbuild.mjs",

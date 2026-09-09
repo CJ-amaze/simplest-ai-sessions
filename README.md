@@ -23,6 +23,7 @@ One sidebar that shows every [Claude Code](https://claude.com/claude-code) and [
 - **Needs-approval badge.** Sessions waiting on a permission prompt are highlighted, and the sidebar badge counts them — no more discovering an agent has been blocked for 20 minutes.
 - **Click a card → focus its terminal.** The card for the currently active terminal is highlighted.
 - **Cards = live processes.** Dead sessions, resume leftovers, and bootstrap ghosts never show. A freshly opened `codex` that hasn't received its first query yet shows as a placeholder card.
+- **tmux-aware.** A session running inside tmux maps to the VS Code terminal that holds its tmux client — same `#n` badge, same click-to-focus. A tmux session with no client in this window shows a `tmux:<session>` chip; click it to attach in a new terminal. Turn on `aiSessions.tmuxAutoAttach` to have such terminals opened automatically (and closed when the tmux session ends).
 - **Every terminal is visible.** Terminals without an AI session show as compact rows (click to focus) and upgrade to a full card the moment you run `claude`/`codex` in them. A **`＋ New Terminal`** button sits at the bottom to start your next session.
 - **Token / context-window / estimated-cost** per session (cost is a reference estimate based on public API list prices; subscription usage differs).
 

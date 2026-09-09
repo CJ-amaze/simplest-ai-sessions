@@ -150,3 +150,21 @@ describe('터미널 번호·답변 줄 (2026-09-02)', () => {
     expect(wo).not.toContain('↳');
   });
 });
+
+describe('tmux 칩 (2026-09-08)', () => {
+  const ref = { session: 'cji-x', target: 'cji-x:@1.%1' };
+  it('shellPid 없는 tmux 세션 카드는 #n 대신 tmux:<session> 칩', () => {
+    const html = renderCards([view({ tmux: ref })]);
+    expect(html).toContain('<span class="tmux" title="Not attached in this window — click to attach">tmux:cji-x</span>');
+    expect(html).not.toContain('termno');
+  });
+  it('붙은 tmux 세션(shellPid 있음)은 평소처럼 #n', () => {
+    const html = renderCards([view({ shellPid: 111, tmux: ref })], undefined, [], new Map([[111, 3]]));
+    expect(html).toContain('<span class="termno">#3</span>');
+    expect(html).not.toContain('class="tmux"');
+  });
+  it('세션 이름은 escape', () => {
+    const html = renderCards([view({ tmux: { session: 'a<b', target: 'a<b:@1.%1' } })]);
+    expect(html).toContain('tmux:a&lt;b');
+  });
+});

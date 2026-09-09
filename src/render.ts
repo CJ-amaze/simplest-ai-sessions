@@ -72,8 +72,14 @@ function renderSessionCards(sessions: SessionView[], activeShellPid?: number,
       const isActive = activeShellPid !== undefined && s.shellPid === activeShellPid;
       // 주제는 한 줄만: ai-title(topic) 우선, 없으면 터미널 이름 (같은 내용 중복 표시 방지)
       const title = s.topic ?? s.terminalName ?? (s.mapping === 'none' ? 'external terminal' : '');
+      // 행 머리: 붙은 터미널이 있으면 #n, tmux 세션인데 이 창에 붙은 클라이언트가 없으면 tmux 칩(클릭 = attach)
+      const lead = s.shellPid !== undefined
+        ? no(s.shellPid)
+        : s.tmux
+          ? `<span class="tmux" title="Not attached in this window — click to attach">tmux:${esc(s.tmux.session)}</span> `
+          : '';
       return `<div class="card ${s.status}${s.status === 'exited' ? ' dim' : ''}${isActive ? ' active' : ''}" data-key="${esc(s.key)}">
-  <div class="row1">${no(s.shellPid)}<span class="status">${STATUS_LABEL[s.status]}</span>
+  <div class="row1">${lead}<span class="status">${STATUS_LABEL[s.status]}</span>
     <span class="model">${esc(s.model ?? s.agent)}</span></div>
   <div class="row2">${esc([s.effort, s.mode].filter(Boolean).join('·'))}${s.pid !== undefined ? ` · pid ${s.pid}` : ''}</div>
   <div class="topic">${esc(title)}</div>${s.lastReply ? `\n  <div class="reply">↳ ${esc(s.lastReply)}</div>` : ''}
@@ -100,6 +106,7 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); 
   border-color: var(--vscode-focusBorder); border-style: solid; }
 .empty { opacity: 0.6; text-align: center; padding: 24px 8px; line-height: 1.7; }
 .termno { opacity: 0.55; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tmux { opacity: 0.6; font-weight: 600; font-size: 0.85em; }
 .reply { opacity: 0.6; font-size: 0.85em; margin-top: 1px; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .card { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px 10px;

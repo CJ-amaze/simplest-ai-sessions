@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -5,11 +6,12 @@ import * as vscode from 'vscode';
 import { AdapterWatcher, claudeSpec, codexSpec } from './adapters/watcher';
 import { EVENTS_FILE, parseHookEventLine, parseStatusLine, STATUS_FILE } from './hooks/events';
 import { installHooks, removeHooks, statusShimPath, writeShim } from './hooks/installer';
-import { ProcessMapper, reconcileSessions } from './mapper';
+import { autoAttachTargets, findTmux, ProcessMapper, reconcileSessions, tmuxRefKey } from './mapper';
+import type { ReconcileResult, TmuxInfo } from './mapper';
 import { SidebarProvider } from './sidebar';
 import { StateStore } from './store';
 import { TailReader } from './tail';
-import type { HookEvent } from './types';
+import type { HookEvent, TmuxRef } from './types';
 
 const SCAN_MS = 2_000;
 const EVENTS_MS = 1_000;
@@ -54,13 +56,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // 활성 터미널 추적 — 해당 세션 카드 강조
   const updateActiveTerminal = async (term: vscode.Terminal | undefined): Promise<void> => {
-    const pid = term
-      ? await Promise.race<number | undefined>([
-          term.processId,
-          new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 1_000)),
-        ])
-      : undefined;
-    provider.setActiveShellPid(pid ?? undefined);
+    provider.setActiveShellPid(term ? await terminalPid(term) : undefined);
   };
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTerminal((t) => void updateActiveTerminal(t)),
@@ -69,7 +65,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // 터미널 생성/종료 시 목록을 5초 기다리지 않고 즉시 반영
   context.subscriptions.push(
     vscode.window.onDidOpenTerminal(() => remap()),
-    vscode.window.onDidCloseTerminal(() => remap()),
+    vscode.window.onDidCloseTerminal((t) => {
+      forgetAttachTerminal(t);
+      remap();
+    }),
   );
 
   // single-flight 헬퍼 — interval보다 오래 걸려도 중첩 금지. 단 60초 넘게 안 끝나는 flight는
@@ -157,6 +156,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // 프로세스 ↔ 터미널 매핑 (5s)
   const doRemap = (): Promise<void> => refreshMapping(store, mapper, codexWatcher);
   const remap = singleFlight('map', doRemap);
+  requestRemap = remap;
   const mapTimer = setInterval(remap, MAP_MS);
   context.subscriptions.push({ dispose: () => clearInterval(mapTimer) });
 
@@ -255,13 +255,19 @@ async function refreshTurnTracking(store: StateStore, scriptPath: string): Promi
   store.setTurnTracking('claude', reliable);
 }
 
-/** 카드 클릭 → 터미널 포커스. 터미널 이름은 중복 가능하므로 shellPid로 식별 */
+interface NativeBinding {
+  sessionId: string;
+  status?: 'busy' | 'idle';
+  name?: string;
+  tmux?: string; // "session:@window.%pane" — tmux 안에서 뜬 세션 (2.1.26x+)
+}
+
 /**
  * Claude Code가 직접 기록하는 세션 상태 파일 (~/.claude/sessions/<pid>.json, v2.1.206+)
  * — pid ↔ sessionId 정확 바인딩. 존재하면 매핑 추측이 전혀 필요 없다.
  */
-async function readNativeBindings(): Promise<Map<number, { sessionId: string; status?: 'busy' | 'idle'; name?: string }>> {
-  const map = new Map<number, { sessionId: string; status?: 'busy' | 'idle'; name?: string }>();
+async function readNativeBindings(): Promise<Map<number, NativeBinding>> {
+  const map = new Map<number, NativeBinding>();
   const dir = path.join(os.homedir(), '.claude', 'sessions');
   let entries: string[] = [];
   try {
@@ -273,13 +279,14 @@ async function readNativeBindings(): Promise<Map<number, { sessionId: string; st
     if (!name.endsWith('.json')) continue;
     try {
       const d = JSON.parse(await fs.promises.readFile(path.join(dir, name), 'utf8')) as {
-        pid?: number; sessionId?: string; status?: string; name?: string;
+        pid?: number; sessionId?: string; status?: string; name?: string; tmux?: string;
       };
       if (typeof d.pid === 'number' && typeof d.sessionId === 'string') {
         map.set(d.pid, {
           sessionId: d.sessionId,
           status: d.status === 'busy' || d.status === 'idle' ? d.status : undefined,
           name: typeof d.name === 'string' && d.name.length > 0 ? d.name : undefined,
+          tmux: typeof d.tmux === 'string' && d.tmux.length > 0 ? d.tmux : undefined,
         });
       }
     } catch {
@@ -289,15 +296,133 @@ async function readNativeBindings(): Promise<Map<number, { sessionId: string; st
   return map;
 }
 
+/** 죽은/이상 상태 터미널의 processId는 영구 pending일 수 있음 — 1초 상한 */
+function terminalPid(term: vscode.Terminal): Promise<number | undefined> {
+  return Promise.race<number | undefined>([
+    term.processId,
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 1_000)),
+  ]);
+}
+
+async function findTerminal(shellPid: number): Promise<vscode.Terminal | undefined> {
+  for (const term of vscode.window.terminals) {
+    if ((await terminalPid(term)) === shellPid) return term;
+  }
+  return undefined;
+}
+
+/**
+ * 카드 클릭 → 터미널 포커스. 터미널 이름은 중복 가능하므로 shellPid로 식별.
+ * tmux 세션이면 먼저 서버 측에서 그 window/pane 을 선택해 두고(클라이언트 유무 무관), 붙은 VS Code
+ * 터미널이 있으면 포커스, 없으면(detached·다른 앱에서만 attach·stale) 새 터미널로 attach.
+ */
 async function focusTerminal(store: StateStore, key: string): Promise<void> {
   // find(): 플레이스홀더(첫 쿼리 전 codex 등) 카드도 포커스 가능해야 함 — all()은 이를 제외한다
   const s = store.find(key);
-  if (!s?.shellPid) return;
-  for (const term of vscode.window.terminals) {
-    if ((await term.processId) === s.shellPid) {
+  if (!s) return;
+  if (s.tmux) await selectTmuxTarget(s.tmux);
+  if (s.shellPid !== undefined) {
+    const term = await findTerminal(s.shellPid);
+    if (term) {
       term.show();
       return;
     }
+  }
+  if (s.tmux) ensureAttachTerminal(s.tmux, true);
+}
+
+/** "session:@w.%p" 의 window/pane 을 현재로 — best-effort, 실패는 무시 */
+async function selectTmuxTarget(ref: TmuxRef): Promise<void> {
+  const bin = findTmux();
+  const m = ref.target.match(/^(.+):(@\d+)\.(%\d+)$/);
+  if (!bin || !m) return;
+  const run = (args: string[]): Promise<void> =>
+    new Promise((resolve) => execFile(bin, args, { timeout: 2_000 }, () => resolve()));
+  await run(['select-window', '-t', `=${m[1]}:${m[2]}`]);
+  await run(['select-pane', '-t', m[3]]);
+}
+
+// ---- tmux attach 터미널 관리 ----
+// 확장이 만든 attach 터미널 (자동·클릭 공통). key = tmuxRefKey — 생성 직후 클릭·연타·다음 pass 의
+// 자동 attach 가 같은 세션에 탭을 하나 더 만들지 않도록 한 경로로 모은다.
+const attachTerminals = new Map<string, vscode.Terminal>();
+// 자동 attach 를 시도한 세션 — 사용자가 그 탭을 닫으면(detach) 같은 세션엔 다시 열지 않는다.
+// 세션이 사라지면 정리되므로 같은 이름으로 다시 만들어진 세션(id 다름)은 다시 열린다.
+const autoAttachAttempted = new Set<string>();
+let tmuxMissingWarned = false;
+
+/**
+ * tmux 세션에 붙은 VS Code 터미널을 보장. 이미 만들어 둔 것이 있으면 그것(focus 면 show).
+ * shellPath 로 tmux 를 직접 띄우므로 셸 인용 문제(zsh 의 `=word` 확장)가 없고, detach·세션 종료 시
+ * 클라이언트가 코드 0 으로 끝나 VS Code 가 탭을 정리한다. 터미널의 processId 가 클라이언트 pid
+ * 자신이라 다음 매핑 pass 에서 그대로 셸 pid 로 잡힌다. 타겟은 이름 대신 id(있으면) — 감지와
+ * attach 사이에 이름이 재사용돼도 엉뚱한 세션에 붙지 않는다.
+ */
+function ensureAttachTerminal(ref: TmuxRef, focus: boolean): vscode.Terminal | undefined {
+  const key = tmuxRefKey(ref);
+  const existing = attachTerminals.get(key);
+  if (existing) {
+    if (focus) existing.show();
+    return existing;
+  }
+  const bin = findTmux();
+  if (!bin) {
+    if (!tmuxMissingWarned) {
+      tmuxMissingWarned = true;
+      void vscode.window.showWarningMessage('AI Sessions: tmux binary not found — cannot attach.');
+    }
+    return undefined;
+  }
+  const target = ref.id?.split('/')[1] ?? `=${ref.session}`;
+  const term = vscode.window.createTerminal({
+    name: ref.session, shellPath: bin, shellArgs: ['attach-session', '-t', target],
+  });
+  attachTerminals.set(key, term);
+  autoAttachAttempted.add(key); // 클릭으로 연 탭도 사용자가 닫으면 자동 attach 가 되살리지 않는다
+  if (focus) term.show();
+  log(`tmux attach: ${ref.session} (${target})${focus ? '' : ' [auto]'}`);
+  // 클라이언트가 서버에 등록되기까지 잠깐 걸린다 — onDidOpenTerminal 의 즉시 remap 이 놓치면 한 번 더
+  setTimeout(() => requestRemap?.(), 1_500);
+  return term;
+}
+
+/** attach 터미널이 닫힘 — 맵에서 제거. 비정상 종료(attach 실패)면 자동 재시도를 허용 */
+function forgetAttachTerminal(t: vscode.Terminal): void {
+  for (const [key, term] of attachTerminals) {
+    if (term !== t) continue;
+    attachTerminals.delete(key);
+    const code = t.exitStatus?.code;
+    if (code !== undefined && code !== 0) autoAttachAttempted.delete(key);
+    log(`tmux attach closed: ${key} exit=${code ?? '?'}`);
+  }
+}
+
+/**
+ * 매핑 pass 뒤 attach 터미널 정리·자동 생성. tmux 조회가 성공한 pass 에서만 (실패면 보류).
+ * ① 세션이 사라진 attach 터미널은 dispose — 클라이언트가 스스로 끝나지 않는 설정
+ *    (detach-on-destroy off 로 다른 세션으로 옮겨감)에서도 탭을 닫는다. 억제 기록도 정리.
+ * ② 설정이 켜져 있으면, 이 창에 붙은 터미널이 없다고 확정된 세션에 포커스 없이 탭을 연다
+ *    (스케줄러가 새벽에 열어도 작업 중인 포커스를 훔치지 않는다).
+ */
+function reconcileAttachTerminals(r: ReconcileResult, tmux: TmuxInfo): void {
+  const live = new Set<string>();
+  for (const p of tmux.panesByPid.values()) {
+    live.add(tmuxRefKey(p));
+    live.add(`name:${p.session}`);
+  }
+  for (const [key, term] of attachTerminals) {
+    if (live.has(key)) continue;
+    attachTerminals.delete(key);
+    term.dispose();
+    log(`tmux attach disposed (session gone): ${key}`);
+  }
+  for (const key of autoAttachAttempted) if (!live.has(key)) autoAttachAttempted.delete(key);
+  if (!vscode.workspace.getConfiguration('aiSessions').get<boolean>('tmuxAutoAttach', false)) return;
+  for (const ref of autoAttachTargets([...r.claims, ...r.orphanProcs], autoAttachAttempted)) {
+    const key = tmuxRefKey(ref);
+    if (!live.has(key)) continue; // 사라진 세션을 가리키는 stale 바인딩 — attach 실패→억제 해제→재시도 루프 방지
+    autoAttachAttempted.add(key);
+    ensureAttachTerminal(ref, false);
   }
 }
 
@@ -314,13 +439,11 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
 
   const shellPids = new Map<number, string | undefined>();
   for (const term of vscode.window.terminals) {
-    // 죽은/이상 상태 터미널의 processId는 영구 pending일 수 있음 — 1초 상한
-    const pid = await Promise.race<number | undefined>([
-      term.processId,
-      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 1_000)),
-    ]);
+    const pid = await terminalPid(term);
     if (pid) shellPids.set(pid, term.name);
   }
+  // tmux 안 프로세스의 터미널 매핑용 — 실패(undefined)면 tmux 경유 매핑은 이번 pass 에 건드리지 않음
+  const tmux = await mapper.tmuxInfo();
   // 휴리스틱 매칭에 쓸 프로세스 cwd 사전 조회 (agent 프로세스는 통상 수 개)
   const cwdByPid = new Map<number, string | undefined>();
   for (const proc of snap.agents) cwdByPid.set(proc.pid, await mapper.cwdOf(proc.pid));
@@ -328,7 +451,8 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   const nativeBindings = await readNativeBindings();
   const r = reconcileSessions({
     agents: snap.agents, byPid: snap.byPid, shellPids,
-    sessions: store.all(), cwdByPid, nativeBindings, codexBindings,
+    sessions: store.all(), cwdByPid, nativeBindings, codexBindings, tmux,
+    placeholderShellPids: store.placeholderShellPids(),
     now: passStartedAt,
   });
   // claim과 parentKey를 한 번의 setProcess로 — 분리 적용하면 자식이 parentKey 설정 전
@@ -338,6 +462,8 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
     store.setProcess(c.key, {
       pid: c.pid, alive: true, mapping: c.mapping,
       terminalName: c.terminalName, shellPid: c.shellPid,
+      // tmux 조회가 실패한 pass 에서는 tmux 표시도 보존 (undefined = 유지, null = 해제)
+      tmux: c.tmux ?? (tmux ? null : undefined),
       parentKey: parentByKey.get(c.key) ?? null,
       busy: c.busy,
       nativeStatus: c.nativeStatus ?? null, // 파일 없으면 해제 (stale 상태 잔류 방지)
@@ -347,7 +473,10 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   // (카드 수 = 살아있는 agent 프로세스 수 불변식. 유령 카드의 근본 수정)
   for (const key of r.exited) store.setProcess(key, { alive: false });
   // 세션 파일이 아직 없는 프로세스(첫 쿼리 전 codex 등)는 플레이스홀더 카드로 표시
-  store.syncPlaceholders(r.orphanProcs, passStartedAt);
+  store.syncPlaceholders(
+    r.orphanProcs.map((o) => ({ ...o, tmux: o.tmux ?? (tmux ? null : undefined) })), passStartedAt,
+  );
+  if (tmux) reconcileAttachTerminals(r, tmux);
   // 세션이 붙지 않은 일반 터미널도 목록에 — "+ New Terminal" 직후 바로 보이도록
   const used = store.usedShellPids();
   const plain: Array<{ name?: string; shellPid: number }> = [];
@@ -359,14 +488,11 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
 
 /** refreshMapping이 provider에 접근할 수 있도록 activate에서 주입 */
 let sidebar: SidebarProvider | undefined;
+/** attach 직후 매핑을 앞당기기 위한 remap 트리거 — activate에서 주입 */
+let requestRemap: (() => void) | undefined;
 
 async function focusTerminalByShellPid(shellPid: number): Promise<void> {
-  for (const term of vscode.window.terminals) {
-    if ((await term.processId) === shellPid) {
-      term.show();
-      return;
-    }
-  }
+  (await findTerminal(shellPid))?.show();
 }
 
 export function deactivate(): void {}

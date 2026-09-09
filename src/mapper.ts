@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
+import { accessSync, constants as fsConstants } from 'node:fs';
+import * as path from 'node:path';
 import { promisify } from 'node:util';
-import type { AgentKind, SessionState } from './types';
+import type { AgentKind, SessionState, TmuxRef } from './types';
 
 const execFileP = promisify(execFile);
 
@@ -134,13 +136,101 @@ export function ancestorChain(pid: number, byPid: Map<number, ProcInfo>): number
   return chain;
 }
 
+// ---- tmux ----
+// tmux 안 프로세스는 부모가 tmux 서버(ppid 1)라 조상 체인이 VS Code 에 닿지 않는다.
+// pane_pid(pane 의 루트 프로세스 — 셸, 또는 exec 된 claude 자신) 로 세션을 알아내고,
+// 그 세션에 붙은 클라이언트 pid 의 조상 체인에서 VS Code 터미널 셸을 찾는다.
+
+export interface TmuxInfo {
+  /** pane_pid → pane 위치 */
+  panesByPid: Map<number, TmuxRef>;
+  /** session_name → 붙은 클라이언트 pid 들 (detached 세션은 항목 없음) */
+  clientPidsBySession: Map<string, number[]>;
+}
+
+export const TMUX_PANES_FORMAT = '#{pane_pid} #{window_id} #{pane_id} #{pid}/#{session_id} #{session_name}';
+export const TMUX_CLIENTS_FORMAT = '#{client_pid} #{session_name}';
+
+/** `tmux list-panes -a -F TMUX_PANES_FORMAT` — 세션 이름은 공백을 가질 수 있어 줄 끝에 둔다 */
+export function parseTmuxPanes(text: string): Map<number, TmuxRef> {
+  const out = new Map<number, TmuxRef>();
+  for (const raw of text.split('\n')) {
+    const m = raw.match(/^(\d+) (@\d+) (%\d+) (\d+\/\$\d+) (.+)$/);
+    if (m) out.set(Number(m[1]), { session: m[5], target: `${m[5]}:${m[2]}.${m[3]}`, id: m[4] });
+  }
+  return out;
+}
+
+/** `tmux list-clients -F TMUX_CLIENTS_FORMAT` */
+export function parseTmuxClients(text: string): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  for (const raw of text.split('\n')) {
+    const m = raw.match(/^(\d+) (.+)$/);
+    if (!m) continue;
+    const arr = out.get(m[2]);
+    if (arr) arr.push(Number(m[1]));
+    else out.set(m[2], [Number(m[1])]);
+  }
+  return out;
+}
+
+/** 네이티브 바인딩(~/.claude/sessions/<pid>.json)의 `tmux: "session:@window.%pane"` */
+export function parseTmuxTarget(s: string | undefined): TmuxRef | undefined {
+  const m = s?.match(/^(.+):@\d+\.%\d+$/);
+  return m && s ? { session: m[1], target: s } : undefined;
+}
+
+/** attach 터미널·자동 attach 억제의 키 — id(서버 pid 포함)가 없으면 이름 */
+export function tmuxRefKey(ref: TmuxRef): string {
+  return ref.id ?? `name:${ref.session}`;
+}
+
+/**
+ * 자동 attach 대상 — 이 창에 붙은 VS Code 터미널이 없다고 "확정"된(shellPid === null) tmux 세션.
+ * undefined(불확실·이전 터미널 유지)와 number(붙어 있음)는 제외. attempted 에 있는 세션은
+ * 사용자가 탭을 닫은 것이므로 다시 열지 않는다. 같은 세션의 여러 프로세스(서브에이전트)는 1개로.
+ */
+export function autoAttachTargets(
+  items: ReadonlyArray<{ tmux?: TmuxRef; shellPid?: number | null }>,
+  attempted: ReadonlySet<string>,
+): TmuxRef[] {
+  const out = new Map<string, TmuxRef>();
+  for (const it of items) {
+    if (!it.tmux || it.shellPid !== null) continue;
+    const key = tmuxRefKey(it.tmux);
+    if (attempted.has(key) || out.has(key)) continue;
+    out.set(key, it.tmux);
+  }
+  return [...out.values()];
+}
+
+let tmuxBinary: string | undefined | null = null; // null = 미조회
+/** tmux 실행 파일 절대 경로 — 확장 호스트 PATH 에 homebrew 가 없을 수 있어 표준 위치도 본다. 1회 조회 후 캐시 */
+export function findTmux(): string | undefined {
+  if (tmuxBinary !== null) return tmuxBinary;
+  const dirs = [...(process.env.PATH ?? '').split(':'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'];
+  for (const d of dirs) {
+    if (!d) continue;
+    const p = path.join(d, 'tmux');
+    try {
+      accessSync(p, fsConstants.X_OK);
+      tmuxBinary = p;
+      return p;
+    } catch {
+      // 다음 후보
+    }
+  }
+  tmuxBinary = undefined;
+  return undefined;
+}
+
 // singleton pairing에서 "활발히 기록 중"으로 인정하는 마지막 활동 창
 export const PAIRING_FRESH_MS = 60_000;
 
 type ReconcileSession = Pick<
   SessionState,
   | 'key' | 'agent' | 'pid' | 'hookPid' | 'cwd' | 'launchCwd'
-  | 'lastActivityAt' | 'processAlive' | 'registeredAt'
+  | 'lastActivityAt' | 'processAlive' | 'registeredAt' | 'shellPid'
 >;
 
 export interface ReconcileInput {
@@ -152,15 +242,21 @@ export interface ReconcileInput {
   /** 사전 조회된 agent 프로세스 cwd (없으면 휴리스틱 매칭 불가) */
   cwdByPid: Map<number, string | undefined>;
   /** Claude Code 자체 선언 바인딩 (~/.claude/sessions/<pid>.json) — 최우선 신호. name은 표시용 */
-  nativeBindings?: Map<number, { sessionId: string; status?: 'busy' | 'idle'; name?: string }>;
+  nativeBindings?: Map<number, { sessionId: string; status?: 'busy' | 'idle'; name?: string; tmux?: string }>;
   codexBindings?: Map<number, CodexBinding>;
+  /** tmux 서버 조회 결과. undefined = 조회 실패(불확실) — tmux 경유 shellPid 는 기존값을 유지한다 */
+  tmux?: TmuxInfo;
+  /** 플레이스홀더(세션 파일 전 프로세스)의 현재 shellPid (pid → shellPid) — 일시 실패 때 유지 판단용 */
+  placeholderShellPids?: Map<number, number>;
   now: number;
 }
 
 export interface ReconcileResult {
   claims: Array<{
     key: string; pid: number; mapping: 'exact' | 'heuristic';
-    terminalName?: string; shellPid?: number;
+    terminalName?: string;
+    shellPid?: number | null; // null = VS Code 터미널 연결 해제 확정(tmux 클라이언트 떠남) → 저장값 삭제
+    tmux?: TmuxRef;           // tmux 경유 프로세스 — shellPid 없으면 클릭 시 attach
     busy: boolean; // 프로세스 트리에 유의미한 CPU 사용 존재 (Esc 중단 vs 긴 도구 실행 판별)
     nativeStatus?: 'busy' | 'idle'; // Claude Code 자체 선언 상태 (있을 때만)
   }>;
@@ -170,7 +266,7 @@ export interface ReconcileResult {
   parentLinks: Array<{ key: string; parentKey: string | null }>;
   /** 세션 파일이 아직 없는 살아있는 agent 프로세스 (예: 첫 쿼리 전 codex) — 플레이스홀더 카드 대상 */
   orphanProcs: Array<{
-    agent: AgentKind; pid: number; terminalName?: string; shellPid?: number;
+    agent: AgentKind; pid: number; terminalName?: string; shellPid?: number | null; tmux?: TmuxRef;
     parentKey: string | null;
     topic?: string; // 네이티브 바인딩의 세션 이름 — 있으면 "Waiting for first query…" 대신 표시
   }>;
@@ -185,7 +281,9 @@ export interface ReconcileResult {
  * — "카드 수 = 살아있는 agent 프로세스 수" 불변식.
  */
 export function reconcileSessions(input: ReconcileInput): ReconcileResult {
-  const { byPid, shellPids, sessions, cwdByPid, nativeBindings, codexBindings, now } = input;
+  const {
+    byPid, shellPids, sessions, cwdByPid, nativeBindings, codexBindings, tmux, placeholderShellPids, now,
+  } = input;
   // 래퍼 collapse: "직계 부모"가 같은 agent인 프로세스만 제외 (node 래퍼 → 바이너리는 항상
   // 직접 부모-자식). 진짜 동종 서브에이전트는 셸(zsh -c)을 거쳐 스폰되므로 걸러지지 않음.
   const agents = input.agents.filter((p) => {
@@ -232,14 +330,49 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
       .filter((s) => s.agent === agent)
       .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
 
+  /**
+   * 프로세스가 속한 VS Code 터미널(shell pid) 결정.
+   * ① 자기 자신·조상 체인에 VS Code 터미널 셸이 있으면 그것 (일반 경로. 자기 pid 포함 —
+   *    pane 에서 exec 된 claude 는 pane_pid 가 자신이다).
+   * ② 없으면 tmux 경유인지 본다: 체인에 pane_pid 가 있거나(1차), 네이티브 바인딩의 tmux 타겟(2차).
+   *    그 세션에 붙은 클라이언트 pid 의 조상 체인(자기 포함 — shellPath 로 tmux 를 직접 띄운 터미널은
+   *    processId 가 클라이언트 자신)에서 VS Code 셸을 찾아 기존 경로(배지·포커스·dedupe)에 태운다.
+   * shellPid 의 세 값: number = 확인됨 / null = 연결 해제 확정(호출부가 저장값을 지운다) /
+   * undefined = 불확실 — tmux 조회 실패, 또는 이전 shellPid 가 ps 상 아직 어떤 클라이언트의 조상
+   * (VS Code processId 1초 타임아웃 같은 일시 실패로 보고 유지. 번호 배지가 깜빡이며 재부여되지 않도록).
+   */
+  const locateTerminal = (proc: ProcInfo, prevShellPid?: number): {
+    shellPid?: number | null; terminalName?: string; tmux?: TmuxRef;
+  } => {
+    const chain = [proc.pid, ...ancestorChain(proc.pid, byPid)];
+    const direct = chain.find((p) => shellPids.has(p));
+    if (direct !== undefined) return { shellPid: direct, terminalName: shellPids.get(direct) };
+    let ref = chain.map((p) => tmux?.panesByPid.get(p)).find((r) => r !== undefined);
+    if (!ref) {
+      ref = parseTmuxTarget(nativeBindings?.get(proc.pid)?.tmux);
+      // 네이티브 타겟엔 session_id 가 없다 — 같은 window·pane(target 일치) 에서 보충.
+      // 이름만 맞는 pane 은 재사용된 이름에 옛 바인딩이 붙는 것이라 제외
+      const id = ref && tmux ? [...tmux.panesByPid.values()].find((p) => p.target === ref!.target)?.id : undefined;
+      if (ref && id !== undefined) ref = { ...ref, id };
+    }
+    if (!ref) return { shellPid: undefined, terminalName: undefined };
+    if (!tmux) return { shellPid: undefined, terminalName: undefined, tmux: ref };
+    const clientChains = (tmux.clientPidsBySession.get(ref.session) ?? [])
+      .map((c) => [c, ...ancestorChain(c, byPid)]);
+    for (const cc of clientChains) {
+      const hit = cc.find((p) => shellPids.has(p));
+      if (hit !== undefined) return { shellPid: hit, terminalName: shellPids.get(hit), tmux: ref };
+    }
+    const keep = prevShellPid !== undefined && clientChains.some((cc) => cc.includes(prevShellPid));
+    return { shellPid: keep ? undefined : null, terminalName: undefined, tmux: ref };
+  };
+
   const claim = (proc: ProcInfo, s: ReconcileSession, mapping: 'exact' | 'heuristic'): void => {
     claimedSessions.add(s.key);
     sessionByProc.set(proc.pid, s.key);
-    const shellPid = ancestorChain(proc.pid, byPid).find((p) => shellPids.has(p));
     claims.push({
       key: s.key, pid: proc.pid, mapping,
-      terminalName: shellPid !== undefined ? shellPids.get(shellPid) : undefined,
-      shellPid,
+      ...locateTerminal(proc, s.shellPid),
       busy: isBusy(proc.pid, byPid),
       nativeStatus: nativeBindings?.get(proc.pid)?.status,
     });
@@ -353,11 +486,9 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
     if (sessionByProc.has(proc.pid)) continue;
     const agent = agentOf(proc);
     if (!agent) continue;
-    const shellPid = ancestorChain(proc.pid, byPid).find((p) => shellPids.has(p));
     orphanProcs.push({
       agent, pid: proc.pid,
-      terminalName: shellPid !== undefined ? shellPids.get(shellPid) : undefined,
-      shellPid,
+      ...locateTerminal(proc, placeholderShellPids?.get(proc.pid)),
       parentKey: parentOf(proc),
       topic: nativeBindings?.get(proc.pid)?.name,
     });
@@ -378,6 +509,30 @@ export class ProcessMapper {
     } catch {
       return new Map();
     }
+  }
+
+  /**
+   * tmux pane·클라이언트 조회. undefined = 불확실(tmux 없음·타임아웃·실행 오류) — 호출부는 tmux 경유
+   * 매핑을 건드리지 않는다. "서버 없음"은 세션 0개라는 확정 답이므로 빈 결과.
+   */
+  async tmuxInfo(): Promise<TmuxInfo | undefined> {
+    const bin = findTmux();
+    if (!bin) return undefined;
+    const run = async (args: string[]): Promise<string | undefined> => {
+      try {
+        const { stdout } = await execFileP(bin, args, { timeout: 2_000 });
+        return stdout;
+      } catch (e) {
+        const stderr = (e as { stderr?: unknown }).stderr;
+        if (typeof stderr === 'string' && /no server running|No such file or directory/i.test(stderr)) return '';
+        return undefined;
+      }
+    };
+    const panes = await run(['list-panes', '-a', '-F', TMUX_PANES_FORMAT]);
+    if (panes === undefined) return undefined;
+    const clients = await run(['list-clients', '-F', TMUX_CLIENTS_FORMAT]);
+    if (clients === undefined) return undefined;
+    return { panesByPid: parseTmuxPanes(panes), clientPidsBySession: parseTmuxClients(clients) };
   }
 
   async snapshot(): Promise<{ ok: boolean; byPid: Map<number, ProcInfo>; agents: ProcInfo[] }> {
