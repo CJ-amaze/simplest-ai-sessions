@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ancestorChain, detectAgent, PAIRING_FRESH_MS, parseForkParentSessionId, parsePsOutput,
+  adoptableAttachTerminals, ancestorChain, containerGone, detectAgent, PAIRING_FRESH_MS, parseForkParentSessionId, parsePsOutput,
   autoAttachTargets, ENSURE_COOLDOWN_MS, ENSURE_GRACE_MS, ensureDue, expandHome, idleShellPids, parseTmuxClients,
   parseTmuxPanes, parseTmuxSessionNames, parseTmuxTarget, REGISTER_GRACE_MS, reconcileSessions, tmuxRefKey,
   tmuxSessions,
@@ -681,5 +681,49 @@ describe('네이티브 세션 이름·빈 터미널 판정 (0.5.1)', () => {
       [604, { pid: 604, ppid: 500, pcpu: 0, command: '/bin/bash' }],      // 보호 대상
     ]);
     expect(idleShellPids([600, 601, 602, 603, 604, 999], byPid, new Set([604]))).toEqual([600, 601]);
+  });
+});
+
+describe('adoptableAttachTerminals / containerGone (0.5.3 — 고스트 제거)', () => {
+  const tmux = {
+    panesByPid: parseTmuxPanes('300 @1 %1 21781/$5 cji-a\n400 @2 %2 21781/$6 cji-b\n'),
+    clientPidsBySession: parseTmuxClients('1000 cji-a\n1001 cji-a\n2000 cji-b\n'),
+    sessions: new Set(['cji-a', 'cji-b', 'cji-c']),
+  };
+  it('터미널 shell pid 가 곧 tmux client pid 인 것만 인수 — 키는 pane 의 id, pane 이 없으면 name:', () => {
+    const out = adoptableAttachTerminals([1000, 2000, 5555], tmux, new Set());
+    expect(out).toEqual([
+      { pid: 1000, key: '21781/$5', session: 'cji-a' },
+      { pid: 2000, key: '21781/$6', session: 'cji-b' },
+    ]);
+    const noPane = { ...tmux, clientPidsBySession: parseTmuxClients('3000 cji-c\n') };
+    expect(adoptableAttachTerminals([3000], noPane, new Set())).toEqual([{ pid: 3000, key: 'name:cji-c', session: 'cji-c' }]);
+  });
+  it('이미 추적 중인 pid 는 건너뛰고, 사용자의 zsh 안 tmux attach(터미널 pid ≠ client pid)는 대상이 아니다', () => {
+    expect(adoptableAttachTerminals([1000, 2000], tmux, new Set([1000]))).toEqual([{ pid: 2000, key: '21781/$6', session: 'cji-b' }]);
+    expect(adoptableAttachTerminals([600], tmux, new Set())).toEqual([]); // 600 = zsh, 그 자식이 클라이언트
+  });
+  it('containerGone: tmux 세션이 사라졌으면 true, 남아 있으면 false, tmux 조회 실패면 false(불확실)', () => {
+    const s = { tmux: { session: 'cji-a', target: 'cji-a:@1.%1' } };
+    expect(containerGone(s, { ...tmux, sessions: new Set(['cji-b']) }, new Set([1000]))).toBe(true);
+    expect(containerGone(s, tmux, new Set())).toBe(false);
+    expect(containerGone(s, undefined, new Set())).toBe(false);
+  });
+  it('containerGone: id 가 있으면 id 로 — 같은 이름으로 다시 만든 세션은 gone, 이름만 바뀐 세션은 살아 있음 (codex 리뷰)', () => {
+    const withId = { tmux: { session: 'cji-a', target: 'cji-a:@1.%1', id: '21781/$5' } };
+    const replaced = { ...tmux, panesByPid: parseTmuxPanes('900 @9 %9 21781/$9 cji-a\n'), sessions: new Set(['cji-a']) };
+    expect(containerGone(withId, replaced, new Set())).toBe(true);
+    const renamed = { ...tmux, panesByPid: parseTmuxPanes('300 @1 %1 21781/$5 cji-renamed\n'), sessions: new Set(['cji-renamed']) };
+    expect(containerGone(withId, renamed, new Set())).toBe(false);
+    expect(containerGone(withId, tmux, new Set())).toBe(false);
+  });
+  it('containerGone: tmux 아닌 세션은 shellPid 터미널이 없어졌을 때만 true. pid 조회 불확실(undefined)·세션 없음·shellPid 없음은 false', () => {
+    expect(containerGone({ shellPid: 600 }, tmux, new Set([700]))).toBe(true);
+    expect(containerGone({ shellPid: 600 }, tmux, new Set([600]))).toBe(false);
+    expect(containerGone({ shellPid: 600 }, tmux, undefined)).toBe(false);
+    expect(containerGone({ tmux: { session: 'cji-a', target: 'cji-a:@1.%1' } }, { ...tmux, sessions: new Set() }, undefined)).toBe(true);
+    expect(containerGone({}, tmux, new Set())).toBe(false);
+    expect(containerGone({ shellPid: null }, tmux, new Set())).toBe(false);
+    expect(containerGone(undefined, tmux, new Set())).toBe(false);
   });
 });

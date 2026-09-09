@@ -73,8 +73,9 @@ function renderSessionCards(sessions: SessionView[], activeShellPid?: number,
       // 주제는 한 줄만: ai-title(topic) 우선, 없으면 터미널 이름 (같은 내용 중복 표시 방지)
       const title = s.topic ?? s.terminalName ?? (s.mapping === 'none' ? 'external terminal' : '');
       // 행 머리: 붙은 터미널이 있으면 #n, tmux 세션인데 이 창에 붙은 클라이언트가 없으면 tmux 칩(클릭 = attach)
+      // exited 카드는 번호를 달지 않는다 — 같은 터미널의 빈 터미널 행이 그 번호를 보여준다(중복 #n 방지)
       const lead = s.shellPid !== undefined
-        ? no(s.shellPid)
+        ? (s.status === 'exited' ? '' : no(s.shellPid))
         : s.tmux
           ? `<span class="tmux" title="Not attached in this window — click to attach">tmux:${esc(s.tmux.session)}</span> `
           : '';

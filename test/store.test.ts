@@ -345,3 +345,19 @@ describe('네이티브 세션 이름 (0.5.1)', () => {
     expect(s.find('claude:a')?.name).toBeUndefined();
   });
 });
+
+describe('remove (0.5.3 — 컨테이너 소멸 시 exited 카드 즉시 제거)', () => {
+  it('remove: 세션 즉시 삭제 + 리스너 통지, 없는 키는 조용히 무시', () => {
+    const s = new StateStore();
+    patch(s, 'a', T);
+    s.setProcess('claude:a', { pid: 700, alive: true }, T);
+    let n = 0;
+    s.onChange(() => { n++; });
+    s.remove('claude:a');
+    expect(s.find('claude:a')).toBeUndefined();
+    expect(s.list(T).length).toBe(0);
+    expect(n).toBe(1);
+    s.remove('claude:zzz');
+    expect(n).toBe(1);
+  });
+});

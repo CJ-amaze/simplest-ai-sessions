@@ -12,9 +12,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private activeShellPid?: number;
   private terminals: PlainTerminal[] = [];
-  // 터미널 번호: shellPid 최초 등장 순서로 부여, 창이 사는 동안 고정. 사라진 pid 는 폐기, 번호 재사용 없음.
+  // 터미널 번호: 새 pid 는 가장 작은 빈 번호(등장 순), 받은 번호는 창이 사는 동안 옮기지 않음. 사라진 pid 의 번호는 다음 새 pid 가 재사용.
   // 설정 aiSessions.pinnedTerminal 의 터미널(관제 세션)은 #1 예약. 규칙은 termno.ts.
-  private termNoState: TermNoState = { no: new Map<number, number>(), next: 1 };
+  // exited 카드도 터미널이 살아 있는 동안은 번호를 유지한다(같은 pid 의 빈 터미널 행과 같은 번호) — 표시·JSON 에서만 뺀다.
+  private termNoState: TermNoState = { no: new Map<number, number>() };
   private get termNo(): Map<number, number> { return this.termNoState.no; }
   private lastTermNoJson?: string;
 
@@ -69,10 +70,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     try {
       const map: Record<string, number> = {};
       for (const v of views) {
-        if (v.shellPid === undefined || !this.termNo.has(v.shellPid)) continue;
+        if (v.status === 'exited' || v.shellPid === undefined || !this.termNo.has(v.shellPid)) continue; // 끝난 세션은 위젯 뱃지에서 제외
         const n = this.termNo.get(v.shellPid)!;
         map[v.sessionId] = n;
-        for (const c of v.children ?? []) map[c.sessionId] = n;
+        for (const c of v.children ?? []) if (c.status !== 'exited') map[c.sessionId] = n;
       }
       const json = JSON.stringify(map);
       if (json !== this.lastTermNoJson) {

@@ -149,6 +149,11 @@ export class StateStore {
     return this.sessions.get(key);
   }
 
+  /** 세션 즉시 삭제 — 컨테이너(tmux 세션·터미널)까지 사라진 exited 세션이 5분 고스트 카드로 남지 않게 (mapper.containerGone) */
+  remove(key: string): void {
+    if (this.sessions.delete(key)) this.emit();
+  }
+
   /** 플레이스홀더의 현재 shellPid (pid → shellPid) — reconcile 이 일시 실패 때 유지 판단에 쓴다 */
   placeholderShellPids(): Map<number, number> {
     const out = new Map<number, number>();

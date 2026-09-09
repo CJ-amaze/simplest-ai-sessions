@@ -177,3 +177,16 @@ describe('세션 이름 줄 (0.5.1)', () => {
     expect(renderCards([view({ name: 'a<b', nameSource: 'user' })])).toContain('<div class="name">a&lt;b</div>');
   });
 });
+
+describe('exited 카드 (0.5.3)', () => {
+  it('exited 카드는 #n 을 달지 않는다 — 같은 pid 의 빈 터미널 행이 번호를 보여준다', () => {
+    const termNo = new Map([[600, 3]]);
+    const html = renderCards(
+      [view({ status: 'exited', shellPid: 600, terminalName: 'zsh' })], undefined, [{ name: 'zsh', shellPid: 600 }], termNo,
+    );
+    expect(html.match(/#3/g)?.length ?? 0).toBe(1);
+    expect(html).toContain('Exited');
+    const alive = renderCards([view({ status: 'idle', shellPid: 600 })], undefined, [], termNo);
+    expect(alive).toContain('#3');
+  });
+});

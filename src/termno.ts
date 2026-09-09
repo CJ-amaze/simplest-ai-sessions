@@ -1,11 +1,11 @@
 /**
  * 터미널 번호(#n) 배정 — vscode 의존 없음(테스트 가능). 사이드바가 상태를 소유한다(창 수명 동안 유지, reload 시 리셋).
- * 규칙: 번호는 shellPid 최초 등장 순으로 부여하고 재사용하지 않는다(OS pid 재사용이 옛 번호를 물려받지 않게).
- * 사라진 pid 는 삭제. 핀(관제 터미널)이 있으면 #1 을 예약 — 다른 터미널은 2 부터, 핀은 언제 나타나도 #1.
+ * 규칙: 새 pid 는 "가장 작은 빈 번호" 를 받는다(등장 순으로 채움). 사라진 pid 의 번호는 다음 새 pid 가 재사용한다
+ * — 빈자리(이빠짐)가 남지 않는다. 이미 받은 번호는 옮기지 않는다(CJ 가 "2번 닫아" 처럼 번호를 핸들로 쓴다 — 당기기(compaction) 금지).
+ * 핀(관제 터미널)이 있으면 #1 을 예약 — 다른 터미널은 2 부터, 핀은 언제 나타나도 #1.
  */
 export interface TermNoState {
   no: Map<number, number>; // shellPid → 번호
-  next: number;            // 다음 새 번호
 }
 
 /**
@@ -20,17 +20,27 @@ export function assignTermNumbers(
   for (const pid of [...state.no.keys()]) {
     if (!live.has(pid)) state.no.delete(pid);
   }
-  if (reserveFirst && state.next < 2) state.next = 2;
-  if (pinned !== undefined && live.has(pinned) && state.no.get(pinned) !== 1) {
-    // 다른 pid 가 #1 을 쥐고 있으면(런타임에 설정을 켰거나 대상이 바뀜) 그쪽을 새 번호로 옮긴다 — "번호 유지" 의 유일한 예외
+  const pinLive = pinned !== undefined && live.has(pinned);
+  const floor = reserveFirst || pinLive ? 2 : 1; // 핀이 있으면(설정이 꺼져 있어도) 1 은 핀 전용
+  const used = new Set(state.no.values());
+  const lowestFree = (): number => {
+    let n = floor;
+    while (used.has(n)) n++;
+    used.add(n);
+    return n;
+  };
+  if (pinLive && state.no.get(pinned) !== 1) {
+    // 다른 pid 가 #1 을 쥐고 있으면(런타임에 설정을 켰거나 대상이 바뀜) 그쪽을 가장 작은 빈 번호로 옮긴다 — "번호 유지" 의 유일한 예외
+    const prev = state.no.get(pinned);
+    if (prev !== undefined) used.delete(prev); // 핀이 놓는 번호는 바로 재사용 가능
     for (const [pid, n] of state.no) {
-      if (n === 1 && pid !== pinned) state.no.set(pid, state.next++);
+      if (n === 1 && pid !== pinned) state.no.set(pid, lowestFree());
     }
     state.no.set(pinned, 1);
-    if (state.next < 2) state.next = 2; // #1 을 썼으니 새 번호가 1 을 재사용하지 않게 (reserveFirst 가 꺼져 있어도)
+    used.add(1);
   }
   for (const pid of live) {
-    if (!state.no.has(pid)) state.no.set(pid, state.next++);
+    if (!state.no.has(pid)) state.no.set(pid, lowestFree());
   }
 }
 

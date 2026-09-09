@@ -7,8 +7,8 @@ import { AdapterWatcher, claudeSpec, codexSpec } from './adapters/watcher';
 import { EVENTS_FILE, parseHookEventLine, parseStatusLine, STATUS_FILE } from './hooks/events';
 import { installHooks, removeHooks, statusShimPath, writeShim } from './hooks/installer';
 import {
-  autoAttachTargets, ENSURE_GRACE_MS, ensureDue, expandHome, findTmux, idleShellPids, ProcessMapper,
-  reconcileSessions, tmuxRefKey, tmuxSessions,
+  adoptableAttachTerminals, autoAttachTargets, containerGone, ENSURE_GRACE_MS, ensureDue, expandHome, findTmux,
+  idleShellPids, ProcessMapper, reconcileSessions, tmuxRefKey, tmuxSessions,
 } from './mapper';
 import type { EnsureEntry, EnsureState, ReconcileResult, TmuxInfo } from './mapper';
 import { SidebarProvider } from './sidebar';
@@ -415,15 +415,33 @@ function forgetAttachTerminal(t: vscode.Terminal): void {
  * ② 설정이 켜져 있으면, 이 창에 붙은 터미널이 없다고 확정된 세션에 포커스 없이 탭을 연다
  *    (스케줄러가 새벽에 열어도 작업 중인 포커스를 훔치지 않는다).
  */
-function reconcileAttachTerminals(r: ReconcileResult, tmux: TmuxInfo): void {
+function reconcileAttachTerminals(
+  r: ReconcileResult, tmux: TmuxInfo, termByPid: ReadonlyMap<number, vscode.Terminal>,
+): void {
+  // ⓪ 인수 — 창 reload·확장 호스트 재시작 뒤 살아남은 attach 탭은 이 인스턴스의 맵에 없다(creationOptions 도 기본 셸로 바뀜, 실측).
+  //    터미널 프로세스가 곧 tmux 클라이언트인 탭을 다시 추적해 ① 이 걸리게 한다. 같은 세션에 이미 추적 탭이 있으면 두 번째는 두지 않는다
+  //    (사용자가 연 것으로 보고 건드리지 않음). ensure 터미널(main.sh)은 제외.
+  const ours = new Set<vscode.Terminal>([...attachTerminals.values(), ...ensureTerminals.values()]);
+  const trackedPids = new Set<number>();
+  for (const [pid, t] of termByPid) if (ours.has(t)) trackedPids.add(pid);
+  for (const a of adoptableAttachTerminals(termByPid.keys(), tmux, trackedPids)) {
+    const t = termByPid.get(a.pid);
+    if (!t || attachTerminals.has(a.key)) continue;
+    attachTerminals.set(a.key, t);
+    autoAttachAttempted.add(a.key);
+    log(`tmux attach adopted: ${a.session} (${a.key}, pid ${a.pid})`);
+  }
   const live = new Set<string>();
   for (const p of tmux.panesByPid.values()) live.add(tmuxRefKey(p));
   for (const s of tmuxSessions(tmux)) live.add(`name:${s}`);
   for (const [key, term] of attachTerminals) {
-    if (live.has(key)) continue;
+    const exited = term.exitStatus !== undefined; // 프로세스는 끝났는데 탭이 남은 경우(VS Code 가 안 닫아 줬을 때)
+    if (live.has(key) && !exited) continue;
     attachTerminals.delete(key);
+    const code = term.exitStatus?.code;
+    if (code !== undefined && code !== 0) autoAttachAttempted.delete(key); // attach 실패는 재시도 허용 (forgetAttachTerminal 과 동일)
     term.dispose();
-    log(`tmux attach disposed (session gone): ${key}`);
+    log(`tmux attach disposed (${exited ? `exited ${code ?? '?'}` : 'session gone'}): ${key}`);
   }
   for (const key of autoAttachAttempted) if (!live.has(key)) autoAttachAttempted.delete(key);
   if (!vscode.workspace.getConfiguration('aiSessions').get<boolean>('tmuxAutoAttach', false)) return;
@@ -573,9 +591,17 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   codexWatcher.trackFiles([...codexBindings.values()].map((b) => b.filePath));
 
   const shellPids = new Map<number, string | undefined>();
+  const termByPid = new Map<number, vscode.Terminal>();
+  let pidUncertain = false; // processId 조회 실패(1초 타임아웃)가 하나라도 있으면 "터미널 없음" 을 근거로 한 삭제를 보류
   for (const term of vscode.window.terminals) {
+    if (term.exitStatus !== undefined) continue; // 프로세스가 끝난 탭 — 터미널로 치지 않는다(빈 터미널 행·번호에서 제외, attach 정리가 닫는다)
     const pid = await terminalPid(term);
-    if (pid) shellPids.set(pid, term.name);
+    if (pid) {
+      shellPids.set(pid, term.name);
+      termByPid.set(pid, term);
+    } else {
+      pidUncertain = true;
+    }
   }
   // tmux 안 프로세스의 터미널 매핑용 — 실패(undefined)면 tmux 경유 매핑은 이번 pass 에 건드리지 않음
   const tmux = await mapper.tmuxInfo();
@@ -608,6 +634,17 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   // 어느 프로세스도 클레임하지 않은 세션 = 프로세스 소멸 — 즉시 exited
   // (카드 수 = 살아있는 agent 프로세스 수 불변식. 유령 카드의 근본 수정)
   for (const key of r.exited) store.setProcess(key, { alive: false });
+  // 컨테이너(tmux 세션·터미널)까지 사라진 exited 세션은 즉시 제거 — "✕ Exited" 카드가 5분 남아 번호를 쥐는 고스트 방지.
+  // 이전 pass 에 exited 된 것도 매번 재확인한다(셸·tmux 가 나중에 닫히는 경우). pid 조회가 불확실한 pass 는 tmux 기준만 본다.
+  // 60초 넘게 멈췄다 재개된 옛 pass 는 스냅샷이 옛것이라 지우지 않는다(터미널 부작용과 같은 가드)
+  const livePids = pidUncertain ? undefined : new Set(shellPids.keys());
+  if (passStartedAt === latestPassStartedAt) {
+    for (const s of store.all()) {
+      if (s.processAlive !== false || !containerGone(s, tmux, livePids)) continue;
+      store.remove(s.key);
+      log(`session removed (container gone): ${s.key}`);
+    }
+  }
   // 세션 파일이 아직 없는 프로세스(첫 쿼리 전 codex 등)는 플레이스홀더 카드로 표시
   store.syncPlaceholders(
     r.orphanProcs.map((o) => ({ ...o, tmux: o.tmux ?? (tmux ? null : undefined) })), passStartedAt,
@@ -616,7 +653,7 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   // (옛 빈 스냅샷으로 방금 뜬 세션의 ensure 터미널을 stale 로 오판·dispose 하는 것 방지)
   if (tmux && passStartedAt === latestPassStartedAt) {
     reconcileEnsuredSessions(tmux);   // 먼저 — 방금 띄운 main.sh 터미널이 있으면 자동 attach 가 그 세션을 건너뛴다
-    reconcileAttachTerminals(r, tmux);
+    reconcileAttachTerminals(r, tmux, termByPid);
   }
   // 세션이 붙지 않은 일반 터미널도 목록에 — "+ New Terminal" 직후 바로 보이도록
   const used = store.usedShellPids();

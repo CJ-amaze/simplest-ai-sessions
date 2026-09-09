@@ -221,6 +221,56 @@ export function autoAttachTargets(
   return [...out.values()];
 }
 
+/**
+ * 추적을 잃은 attach 탭 인수(adopt) — 창 reload·확장 호스트 재시작 뒤 살아남은 attach 터미널은 새 인스턴스의 맵에 없고
+ * creationOptions 도 기본 셸(`/bin/zsh -l`)로 바뀐다(2026-09-09 실측). 터미널의 shell pid 가 곧 tmux 클라이언트 pid 인 것
+ * (shellPath 로 tmux 를 직접 띄운 탭)만 대상 — 사용자가 zsh 에서 `tmux attach` 한 탭은 pid 가 셸이라 제외된다.
+ * 사용자가 `exec tmux attach` 한 탭은 잡히지만, 세션이 죽으면 그 탭도 어차피 끝나므로 dispose 가 무해하다.
+ * 키는 attach 키 규칙(tmuxRefKey)과 같다: 그 세션 pane 의 `#{pid}/#{session_id}`, 없으면 `name:<session>`.
+ */
+export function adoptableAttachTerminals(
+  terminalPids: Iterable<number>, tmux: TmuxInfo, tracked: ReadonlySet<number>,
+): Array<{ pid: number; key: string; session: string }> {
+  const sessionByClient = new Map<number, string>();
+  for (const [session, pids] of tmux.clientPidsBySession) for (const p of pids) sessionByClient.set(p, session);
+  const idBySession = new Map<string, string>();
+  for (const p of tmux.panesByPid.values()) {
+    if (p.id !== undefined && !idBySession.has(p.session)) idBySession.set(p.session, p.id);
+  }
+  const out: Array<{ pid: number; key: string; session: string }> = [];
+  for (const pid of terminalPids) {
+    if (tracked.has(pid)) continue;
+    const session = sessionByClient.get(pid);
+    if (session === undefined) continue;
+    out.push({ pid, key: idBySession.get(session) ?? `name:${session}`, session });
+  }
+  return out;
+}
+
+/**
+ * exited 세션의 컨테이너(tmux 세션 또는 VS Code 터미널)가 사라졌는가 — 사라졌으면 카드를 즉시 지운다
+ * (kill-session·탭 닫힘 뒤 "✕ Exited" 카드가 5분 남아 번호를 쥐는 고스트 방지). 셸·tmux 세션이 살아 있으면 false(resume 대비 유지).
+ * 불확실하면 false: tmux 조회 실패(tmux undefined), 터미널 pid 조회가 불완전(shellPids undefined), shellPid 없음.
+ */
+export function containerGone(
+  s: { tmux?: TmuxRef; shellPid?: number | null } | undefined,
+  tmux: TmuxInfo | undefined,
+  shellPids: ReadonlySet<number> | undefined,
+): boolean {
+  if (!s) return false;
+  if (s.tmux) {
+    if (tmux === undefined) return false;
+    // id(서버 pid/세션 id)가 있으면 그것으로 — 같은 이름으로 다시 만든 세션(닫고 바로 재오픈)은 다른 id 라 옛 카드가 남지 않고,
+    // 이름을 바꾼 세션은 같은 id 라 살아 있는 것으로 본다 (codex 리뷰)
+    if (s.tmux.id !== undefined) {
+      for (const p of tmux.panesByPid.values()) if (p.id === s.tmux.id) return false;
+      return true;
+    }
+    return !tmuxSessions(tmux).has(s.tmux.session);
+  }
+  return typeof s.shellPid === 'number' && shellPids !== undefined && !shellPids.has(s.shellPid);
+}
+
 // ---- 시작 시 빈 터미널 정리 (설정 aiSessions.startupLayout.closeIdleTerminals) ----
 const SHELL_NAMES = new Set(['zsh', 'bash', 'sh', 'fish', 'tcsh', 'ksh', 'dash', 'nu', 'pwsh']);
 
