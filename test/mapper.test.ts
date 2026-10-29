@@ -25,6 +25,23 @@ describe('parsePsOutput', () => {
 });
 
 describe('detectAgent', () => {
+  it.each([
+    '/Users/cj/.codex/packages/app-server-daemon/releases/0.165.0/bin/codex app-server --listen unix:// --managed-daemon',
+    'codex app-server daemon pid-update-loop',
+    'node /bin/codex app-server --listen stdio://',
+    'bun /bin/codex mcp-server',
+    'codex exec-server',
+    'codex --config model=gpt-6 --enable example app-server',
+  ])('excludes Codex services from session detection: %s', (command) => {
+    expect(detectAgent(command)).toBeNull();
+  });
+  it.each([
+    'codex --yolo', 'codex exec fix app-server', 'codex resume --last',
+    'codex --model app-server', 'codex -- explain app-server',
+    'node /bin/codex --config model=gpt-6 review',
+  ])('keeps real Codex clients and service names used as prompt/option values: %s', (command) => {
+    expect(detectAgent(command)).toBe('codex');
+  });
   it('직접 실행 바이너리', () => {
     expect(detectAgent('claude')).toBe('claude');
     expect(detectAgent('codex --model gpt-5.6')).toBe('codex');
@@ -102,6 +119,17 @@ function sess(key: string, over: Record<string, unknown> = {}) {
 
 describe('reconcileSessions', () => {
   const claudeProc = { pid: 700, ppid: 600, pcpu: 0, command: 'claude' };
+
+  it('does not transfer a recently closed session to a new process in the same cwd', () => {
+    const r = reconcileSessions(makeInput({
+      agents: [claudeProc], byPid: new Map([[700, claudeProc]]),
+      cwdByPid: new Map([[700, '/w']]),
+      sessions: [sess('claude:closed', { pid: 699, cwd: '/w', processAlive: true })],
+    }));
+    expect(r.claims).toEqual([]);
+    expect(r.exited).toEqual(['claude:closed']);
+    expect(r.orphanProcs).toMatchObject([{ pid: 700 }]);
+  });
 
   it('pid exact 클레임 → mapping exact', () => {
     const r = reconcileSessions(makeInput({

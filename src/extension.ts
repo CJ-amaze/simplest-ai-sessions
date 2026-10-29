@@ -12,6 +12,7 @@ import {
 } from './mapper';
 import type { EnsureEntry, EnsureState, ReconcileResult, TmuxInfo } from './mapper';
 import { SidebarProvider } from './sidebar';
+import { singleFlight, SnapshotGeneration } from './polling';
 import { StateStore } from './store';
 import { TailReader } from './tail';
 import type { HookEvent, TmuxRef } from './types';
@@ -77,29 +78,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // single-flight 헬퍼 — interval보다 오래 걸려도 중첩 금지. 단 60초 넘게 안 끝나는 flight는
-  // 멈춘 것으로 간주하고 새 flight를 허용 (fs/터미널 API가 영구 pending 되어도 자기치유)
+  // Stateful scan/event readers share their startup and interval flight. Only
+  // mapping may restart a stale flight, with a generation guard before commit.
   const passAges: Record<string, number> = {}; // 하트비트용 — 마지막 "완료" 시각
-  function singleFlight(name: string, fn: () => Promise<void>, staleMs = 60_000): () => void {
-    let startedAt: number | undefined;
-    let flightId = 0;
-    return () => {
-      const now = Date.now();
-      if (startedAt !== undefined) {
-        if (now - startedAt < staleMs) return;
-        log(`${name}: flight ${Math.round((now - startedAt) / 1000)}s째 미완료 — 멈춤 판단, 재시작`);
+  function poll(name: string, fn: () => Promise<void>, staleMs?: number): () => Promise<void> {
+    return singleFlight(async () => {
+      try {
+        await fn();
+        passAges[name] = Date.now();
+      } catch (e) {
+        log(`${name}: 오류 — ${String(e).slice(0, 200)}`);
       }
-      startedAt = now;
-      const id = ++flightId;
-      void fn()
-        .catch((e) => log(`${name}: 오류 — ${String(e).slice(0, 200)}`))
-        .finally(() => {
-          if (id === flightId) {
-            startedAt = undefined;
-            passAges[name] = Date.now();
-          }
-        });
-    };
+    }, {
+      staleMs,
+      onStale: (age) => log(`${name}: flight ${Math.round(age / 1000)}s째 미완료 — 멈춤 판단, 재시작`),
+    });
   }
 
   // 하트비트 (60s) — pass별 마지막 완료 나이. 멈춤/에러가 한 줄로 보이게
@@ -117,9 +110,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const now = Date.now();
     for (const w of watchers) await w.scan(now).catch((e) => log(`scan: ${String(e).slice(0, 120)}`));
   };
-  const scan = singleFlight('scan', doScan);
-  const scanTimer = setInterval(scan, SCAN_MS);
-  context.subscriptions.push({ dispose: () => clearInterval(scanTimer) });
+  const scan = poll('scan', doScan);
 
   // hook 이벤트 tail (1s) — 세션 등록 전에 도착한 이벤트(sessionId 명시, 스토어 미등록)는
   // pending에 보관 후 매 drain 시작 시 재시도. 60초 만료, 최대 100개 (F1)
@@ -155,23 +146,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
     }
   };
-  const drainEvents = singleFlight('events', doDrain);
-  const eventsTimer = setInterval(drainEvents, EVENTS_MS);
-  context.subscriptions.push({ dispose: () => clearInterval(eventsTimer) });
+  const drainEvents = poll('events', doDrain);
 
   // 프로세스 ↔ 터미널 매핑 (5s)
   const doRemap = (): Promise<void> => refreshMapping(store, mapper, codexWatcher);
-  const remap = singleFlight('map', doRemap);
+  const map = poll('map', doRemap, 60_000);
+  let primed = false;
+  const remap = (): void => { if (primed) void map(); };
   requestRemap = remap;
-  const mapTimer = setInterval(remap, MAP_MS);
-  context.subscriptions.push({ dispose: () => clearInterval(mapTimer) });
+  let disposed = false;
+  context.subscriptions.push({ dispose: () => { disposed = true; } });
 
   // priming — 재시작 직후 첫 매핑이 세션 등록·이벤트 재생(hookPid 복원)보다 먼저 돌면
   // 엉터리 cwd 추측으로 바인딩되고 pid로 고착된다. 순서를 강제: 등록 → 이벤트 → 매핑
   void (async () => {
-    await doScan().catch(() => {});
-    await doDrain().catch((e) => log(`priming drain: ${String(e).slice(0, 120)}`));
-    await doRemap().catch((e) => log(`priming map: ${String(e).slice(0, 120)}`));
+    await scan();
+    if (disposed) return;
+    await drainEvents();
+    if (disposed) return;
+    await map();
+    if (disposed) return;
+    primed = true;
+    for (const [run, ms] of [[scan, SCAN_MS], [drainEvents, EVENTS_MS], [remap, MAP_MS]] as const) {
+      const timer = setInterval(run, ms);
+      context.subscriptions.push({ dispose: () => clearInterval(timer) });
+    }
     log('priming 완료 (등록→이벤트→매핑)');
     // 시작 레이아웃은 첫 매핑(ensure·자동 attach 가 터미널을 만든 뒤)에 이어서
     await applyStartupLayout(store, mapper, initialTerminals)
@@ -582,13 +581,11 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   // grace 판정 기준 시각은 pass 시작 시각 — 스냅샷 후 lsof가 오래 걸려도 그 사이 등록된
   // 세션이 "grace 만료"로 오판되지 않도록 (스냅샷에 없는 프로세스의 세션 보호)
   const passStartedAt = Date.now();
-  latestPassStartedAt = passStartedAt;
+  const isCurrent = mappingGeneration.begin();
   const snap = await mapper.snapshot();
   if (!snap.ok) return; // ps 실패 — 생사 판정 근거 없음, 이번 pass 전체 skip
 
-  const codexBindings = await mapper.codexBindings(snap.agents);
-  // Resumed sessions may live outside today's/yesterday's directories.
-  codexWatcher.trackFiles([...codexBindings.values()].map((b) => b.filePath));
+  const codexBindings = await mapper.codexBindings(snap.agents, snap.byPid);
 
   const shellPids = new Map<number, string | undefined>();
   const termByPid = new Map<number, vscode.Terminal>();
@@ -610,6 +607,11 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   for (const proc of snap.agents) cwdByPid.set(proc.pid, await mapper.cwdOf(proc.pid));
 
   const nativeBindings = await readNativeBindings();
+  // No state mutation from an obsolete snapshot: claims and placeholders are
+  // just as destructive as terminal disposal when a closed session reappears.
+  if (!isCurrent()) return;
+  // Resumed sessions may live outside today's/yesterday's directories.
+  codexWatcher.trackFiles([...codexBindings.values()].flatMap((b) => b ? [b.filePath] : []));
   const r = reconcileSessions({
     agents: snap.agents, byPid: snap.byPid, shellPids,
     sessions: store.all(), cwdByPid, nativeBindings, codexBindings, tmux,
@@ -638,12 +640,10 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   // 이전 pass 에 exited 된 것도 매번 재확인한다(셸·tmux 가 나중에 닫히는 경우). pid 조회가 불확실한 pass 는 tmux 기준만 본다.
   // 60초 넘게 멈췄다 재개된 옛 pass 는 스냅샷이 옛것이라 지우지 않는다(터미널 부작용과 같은 가드)
   const livePids = pidUncertain ? undefined : new Set(shellPids.keys());
-  if (passStartedAt === latestPassStartedAt) {
-    for (const s of store.all()) {
-      if (s.processAlive !== false || !containerGone(s, tmux, livePids)) continue;
-      store.remove(s.key);
-      log(`session removed (container gone): ${s.key}`);
-    }
+  for (const s of store.all()) {
+    if (s.processAlive !== false || !containerGone(s, tmux, livePids)) continue;
+    store.remove(s.key);
+    log(`session removed (container gone): ${s.key}`);
   }
   // 세션 파일이 아직 없는 프로세스(첫 쿼리 전 codex 등)는 플레이스홀더 카드로 표시
   store.syncPlaceholders(
@@ -651,7 +651,7 @@ async function refreshMapping(store: StateStore, mapper: ProcessMapper, codexWat
   );
   // 60초 넘게 멈춘 pass 가 새 pass 뒤에 재개되면 이 스냅샷은 옛것 — 터미널을 만들거나 지우는 부작용은 건너뛴다
   // (옛 빈 스냅샷으로 방금 뜬 세션의 ensure 터미널을 stale 로 오판·dispose 하는 것 방지)
-  if (tmux && passStartedAt === latestPassStartedAt) {
+  if (tmux) {
     reconcileEnsuredSessions(tmux);   // 먼저 — 방금 띄운 main.sh 터미널이 있으면 자동 attach 가 그 세션을 건너뛴다
     reconcileAttachTerminals(r, tmux, termByPid);
   }
@@ -669,7 +669,7 @@ let sidebar: SidebarProvider | undefined;
 /** attach 직후 매핑을 앞당기기 위한 remap 트리거 — activate에서 주입 */
 let requestRemap: (() => void) | undefined;
 /** 가장 최근에 시작한 매핑 pass 의 시각 — 지연 재개된 옛 pass 의 부작용 차단용 */
-let latestPassStartedAt = 0;
+const mappingGeneration = new SnapshotGeneration();
 
 async function focusTerminalByShellPid(shellPid: number): Promise<void> {
   (await findTerminal(shellPid))?.show();

@@ -3,6 +3,7 @@ import type { SessionFields } from '../types';
 const TOPIC_MAX = 60;
 
 export interface CodexAccum {
+  sessionSource?: string;
   model?: string;
   approvalPolicy?: string;
   effort?: string;          // turn_context.effort — max/high 등
@@ -40,6 +41,7 @@ export function applyCodexLine(acc: CodexAccum, line: string): boolean {
   const ts = typeof d.timestamp === 'string' ? Date.parse(d.timestamp) : NaN;
 
   if (d.type === 'session_meta') {
+    if (typeof p.source === 'string') { acc.sessionSource = p.source; changed = true; }
     if (typeof p.cwd === 'string') {
       acc.cwd = p.cwd;
       if (acc.launchCwd === undefined) acc.launchCwd = p.cwd;
@@ -56,6 +58,22 @@ export function applyCodexLine(acc: CodexAccum, line: string): boolean {
     const pt = p.type;
     // 모든 event_msg는 런타임 이벤트 = 실작업 증거 (session_meta/turn_context 같은 설정 기록과 구분)
     if (!Number.isNaN(ts)) { acc.lastWorkAt = ts; changed = true; }
+    // 0.165 paginated history uses typed items instead of user_message and
+    // agent_message. Commentary is activity, but must not become the last reply.
+    if (pt === 'item_completed' && p.item && typeof p.item === 'object') {
+      const item = p.item as Record<string, unknown>;
+      const content = Array.isArray(item.content) ? item.content : [];
+      const text = content.filter((part) => part && typeof part.text === 'string')
+        .map((part) => part.text).join('\n');
+      if (item.type === 'UserMessage' && text) {
+        acc.lastUserMessage = text;
+        acc.lastReply = '';
+        changed = true;
+      } else if (item.type === 'AgentMessage' && item.phase === 'final_answer' && text) {
+        acc.lastReply = text;
+        changed = true;
+      }
+    }
     // 완전 독립문 — 아래 else-if 체인(완료시각의 task_complete 분기 포함)과 절대
     // 엮이면 안 된다. 체인 중간에 끼우면 어느 쪽이든 한 분기를 가로챈다.
     if (pt === 'task_complete' && typeof p.last_agent_message === 'string'
@@ -99,6 +117,7 @@ function truncate(s: string | undefined, max: number): string | undefined {
 
 export function codexFields(acc: CodexAccum): SessionFields {
   return {
+    sessionSource: acc.sessionSource,
     model: acc.model,
     mode: [acc.approvalPolicy, acc.sandbox].filter(Boolean).join('·') || undefined,
     effort: acc.effort,

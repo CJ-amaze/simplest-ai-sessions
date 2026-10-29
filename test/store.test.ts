@@ -85,13 +85,42 @@ describe('StateStore', () => {
     expect(s.all()[0].hookPid).toBeUndefined();
   });
 
-  it('hook event: sessionId 없으면 같은 agent의 최근 활동 세션으로', () => {
+  it('does not route an unidentified hook to the most recently active of multiple sessions', () => {
     const s = new StateStore();
     patch(s, 'old', T - 60_000);
     patch(s, 'recent', T);
-    s.applyHookEvent({ agent: 'claude', kind: 'approval', observedAt: T + 1000 });
-    expect(s.all().find((x) => x.sessionId === 'recent')!.approvalAt).toBe(T + 1000);
+    expect(s.applyHookEvent({ agent: 'claude', kind: 'approval', observedAt: T + 1000 })).toBe(false);
+    expect(s.all().find((x) => x.sessionId === 'recent')!.approvalAt).toBeUndefined();
     expect(s.all().find((x) => x.sessionId === 'old')!.approvalAt).toBeUndefined();
+  });
+
+  it('does not apply an unknown explicit PID to an unrelated session', () => {
+    const s = new StateStore();
+    patch(s, 'a', T);
+    s.setProcess('claude:a', { pid: 100, alive: true });
+    expect(s.applyHookEvent({ agent: 'claude', kind: 'approval', pid: 200, observedAt: T + 1000 })).toBe(false);
+    expect(s.find('claude:a')!.approvalAt).toBeUndefined();
+  });
+
+  it('routes a native binary PID through the verified hook hint instead of another wrapper', () => {
+    const s = new StateStore();
+    patch(s, 'a', T);
+    patch(s, 'b', T + 500);
+    s.setProcess('claude:a', { pid: 100, alive: true });
+    s.applyHookEvent({ agent: 'claude', sessionId: 'a', kind: 'notification', pid: 101, observedAt: T });
+    expect(s.applyHookEvent({ agent: 'claude', kind: 'approval', pid: 101, observedAt: T + 1000 })).toBe(true);
+    expect(s.find('claude:a')!.approvalAt).toBe(T + 1000);
+    expect(s.find('claude:b')!.approvalAt).toBeUndefined();
+  });
+
+  it('allows an unidentified hook when only one real session is available', () => {
+    const s = new StateStore();
+    patch(s, 'a', T);
+    expect(s.applyHookEvent({ agent: 'claude', kind: 'approval', observedAt: T + 1000 })).toBe(true);
+    expect(s.find('claude:a')!.approvalAt).toBe(T + 1000);
+    s.syncPlaceholders([{ agent: 'claude', pid: 200, parentKey: null }], T);
+    expect(s.applyHookEvent({ agent: 'claude', kind: 'approval', observedAt: T + 2000 })).toBe(false);
+    expect(s.find('claude:pending-200')!.approvalAt).toBeUndefined();
   });
 
   it('list: 등록순 고정 정렬 — 상태가 바뀌어도 카드 순서는 유지', () => {

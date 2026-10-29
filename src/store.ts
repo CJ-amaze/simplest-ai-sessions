@@ -110,6 +110,11 @@ export class StateStore {
   ): void {
     const s = this.sessions.get(key);
     if (!s) return;
+    // A Codex card represents its client, not the shared daemon or an idle shell.
+    if (info.alive === false && s.agent === 'codex') {
+      this.remove(key);
+      return;
+    }
     if (info.pid !== undefined) s.pid = info.pid;
     if (info.busy !== undefined) s.busy = info.busy;
     if (info.nativeStatus === null) s.nativeStatus = undefined;
@@ -296,15 +301,14 @@ export class StateStore {
       return this.sessions.get(`${e.agent}:${e.sessionId}`);
     }
     if (e.pid !== undefined) {
-      for (const s of this.sessions.values()) if (s.agent === e.agent && s.pid === e.pid) return s;
+      const matches = this.all().filter((s) => s.agent === e.agent && s.processAlive !== false &&
+        (s.pid === e.pid || s.hookPid === e.pid));
+      return matches.length === 1 ? this.sessions.get(matches[0].key) : undefined;
     }
-    // 폴백: 같은 agent에서 가장 최근 활동한 비-exited 세션
-    let best: (SessionState & { exitedAt?: number }) | undefined;
-    for (const s of this.sessions.values()) {
-      if (s.agent !== e.agent || s.exitedAt !== undefined) continue;
-      if (!best || s.lastActivityAt > best.lastActivityAt) best = s;
-    }
-    return best;
+    // Without an identifier, only an unambiguous single session is safe.
+    // Recency says nothing about which terminal requested approval.
+    const candidates = [...this.sessions.values()].filter((s) => s.agent === e.agent && s.processAlive !== false);
+    return candidates.length === 1 && !candidates[0].key.includes(':pending-') ? candidates[0] : undefined;
   }
 
   private emit(): void {

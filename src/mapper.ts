@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { accessSync, constants as fsConstants } from 'node:fs';
+import { accessSync, constants as fsConstants, promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { AgentKind, SessionState, TmuxRef } from './types';
@@ -17,13 +17,18 @@ export interface ProcInfo {
   ppid: number;
   pcpu: number;
   command: string;
+  startedAt?: number;
 }
 
 export function parsePsOutput(text: string): ProcInfo[] {
   const out: ProcInfo[] = [];
   for (const raw of text.split('\n')) {
     const m = raw.trim().match(/^(\d+)\s+(\d+)\s+([\d.,]+)\s+(.+)$/);
-    if (m) out.push({ pid: Number(m[1]), ppid: Number(m[2]), pcpu: Number(m[3].replace(',', '.')) || 0, command: m[4] });
+    if (m) {
+      const start = m[4].match(/^(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
+      out.push({ pid: Number(m[1]), ppid: Number(m[2]), pcpu: Number(m[3].replace(',', '.')) || 0,
+        command: start?.[2] ?? m[4], ...(start ? { startedAt: Date.parse(start[1]) } : {}) });
+    }
   }
   return out;
 }
@@ -53,6 +58,39 @@ export function isBusy(pid: number, byPid: Map<number, ProcInfo>): boolean {
 // (bg 세션의 "진짜" 프로세스는 versions/<semver> 바이너리로 떠서 여기 안 걸리고,
 // 네이티브 바인딩 보강으로 별도 인정된다)
 const CLAUDE_INFRA_ARGS = new Set(['daemon', 'bg-pty-host', 'bg-spare', '--bg-pty-host', '--bg-spare']);
+const CODEX_SERVICES = new Set(['app-server', 'mcp-server', 'exec-server']);
+const CODEX_VALUE_FLAGS = new Set([
+  '-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env',
+  '-i', '--image', '-m', '--model', '--local-provider', '-p', '--profile',
+  '-s', '--sandbox', '-C', '--cd', '--add-dir', '-a', '--ask-for-approval',
+]);
+
+/** Only inspect the command position, never service names inside a prompt. */
+function codexSubcommand(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') return undefined; // the remainder is a literal prompt
+    if (CODEX_VALUE_FLAGS.has(arg)) { i++; continue; }
+    if (arg.startsWith('-')) continue;
+    return arg;
+  }
+  return undefined;
+}
+
+function codexArgs(command: string): string[] | undefined {
+  const tokens = command.split(/\s+/);
+  const first = path.basename(tokens[0] ?? '');
+  const index = first === 'node' || first === 'bun' ? 1 : 0;
+  if (path.basename(tokens[index] ?? '') !== 'codex') return undefined;
+  return tokens.slice(index + 1);
+}
+
+export function isCodexServer(command: string): boolean {
+  const args = codexArgs(command);
+  if (!args) return false;
+  return codexSubcommand(args) === 'app-server' &&
+    !/\bapp-server\s+(daemon|proxy|generate-ts|generate-json-schema|help)\b/.test(command);
+}
 
 export function detectAgent(command: string): AgentKind | null {
   const tokens = command.split(/\s+/);
@@ -66,21 +104,25 @@ export function detectAgent(command: string): AgentKind | null {
       const arg = tokens[i + 1];
       return arg !== undefined && CLAUDE_INFRA_ARGS.has(arg) ? null : 'claude';
     }
-    if (base === 'codex') return 'codex';
+    if (base === 'codex') return CODEX_SERVICES.has(codexSubcommand(tokens.slice(i + 1)) ?? '') ? null : 'codex';
   }
   return null;
 }
 
 const TRANSCRIPT_UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl/;
 
-export interface CodexBinding { sessionId: string; filePath: string }
+export interface CodexBinding { sessionId: string; filePath: string; mapping?: 'exact' | 'heuristic' }
+export type CodexBindings = Map<number, CodexBinding | null>;
 
 /** lsof's process records identify the rollout actually held open by Codex. */
-export function parseCodexBindings(output: string): Map<number, CodexBinding> {
+export function parseCodexOpenFiles(output: string): Map<number, CodexBinding[]> {
   const files = new Map<number, Map<string, CodexBinding>>();
   let pid: number | undefined;
   for (const line of output.split('\n')) {
-    if (/^p\d+$/.test(line)) pid = Number(line.slice(1));
+    if (/^p\d+$/.test(line)) {
+      pid = Number(line.slice(1));
+      if (!files.has(pid)) files.set(pid, new Map());
+    }
     if (pid === undefined || !line.startsWith('n/')) continue;
     const filePath = line.slice(1);
     if (!/\/rollout-[^/]+\.jsonl$/.test(filePath)) continue;
@@ -89,12 +131,47 @@ export function parseCodexBindings(output: string): Map<number, CodexBinding> {
     if (!files.has(pid)) files.set(pid, new Map());
     files.get(pid)!.set(filePath, { sessionId: sid, filePath });
   }
+  return new Map([...files].map(([owner, paths]) => [owner, [...paths.values()]]));
+}
+
+export function parseCodexBindings(output: string): Map<number, CodexBinding> {
   const bindings = new Map<number, CodexBinding>();
-  for (const [owner, paths] of files) {
+  for (const [owner, paths] of parseCodexOpenFiles(output)) {
     // Multiple live rollouts in one process are ambiguous; never guess an owner.
-    if (paths.size === 1) bindings.set(owner, [...paths.values()][0]);
+    if (paths.length === 1) bindings.set(owner, paths[0]);
   }
   return bindings;
+}
+
+export interface CodexDaemonSession extends CodexBinding {
+  createdAt: number;
+  originator?: string;
+}
+
+/** Shared servers own many rollouts. Attribute only to a unique client launch
+ * (ps has second precision), or an explicit `resume <id>`; ambiguity stays pending.
+ * Never use daemon liveness or cwd alone as a session's identity. */
+export function bindCodexClients(
+  clients: ProcInfo[], sessions: CodexDaemonSession[],
+): Map<number, CodexBinding> {
+  const candidates = new Map<number, CodexDaemonSession[]>();
+  for (const client of clients) {
+    const args = codexArgs(client.command) ?? [];
+    const explicit = codexSubcommand(args) === 'resume'
+      ? args.join(' ').match(/\bresume\s+([0-9a-f-]{36})(?:\s|$)/)?.[1] : undefined;
+    const matches = sessions.filter((s) => explicit ? s.sessionId === explicit :
+      s.originator === 'codex-tui' && client.startedAt !== undefined &&
+      s.createdAt >= client.startedAt && s.createdAt - client.startedAt <= 30_000);
+    candidates.set(client.pid, matches);
+  }
+  const result = new Map<number, CodexBinding>();
+  for (const [pid, matches] of candidates) {
+    if (matches.length !== 1) continue;
+    const session = matches[0];
+    if ([...candidates.values()].filter((xs) => xs.some((s) => s.sessionId === session.sessionId)).length !== 1) continue;
+    result.set(pid, { sessionId: session.sessionId, filePath: session.filePath, mapping: 'heuristic' });
+  }
+  return result;
 }
 
 /** The npm wrapper and its direct Codex binary represent the same session. */
@@ -366,7 +443,7 @@ export const PAIRING_FRESH_MS = 60_000;
 type ReconcileSession = Pick<
   SessionState,
   | 'key' | 'agent' | 'pid' | 'hookPid' | 'cwd' | 'launchCwd'
-  | 'lastActivityAt' | 'processAlive' | 'registeredAt' | 'shellPid'
+  | 'lastActivityAt' | 'processAlive' | 'registeredAt' | 'shellPid' | 'sessionSource'
 >;
 
 export interface ReconcileInput {
@@ -381,7 +458,7 @@ export interface ReconcileInput {
   nativeBindings?: Map<number, {
     sessionId: string; status?: 'busy' | 'idle'; name?: string; nameSource?: 'user' | 'derived'; tmux?: string;
   }>;
-  codexBindings?: Map<number, CodexBinding>;
+  codexBindings?: CodexBindings;
   /** tmux 서버 조회 결과. undefined = 조회 실패(불확실) — tmux 경유 shellPid 는 기존값을 유지한다 */
   tmux?: TmuxInfo;
   /** 플레이스홀더(세션 파일 전 프로세스)의 현재 shellPid (pid → shellPid) — 일시 실패 때 유지 판단용 */
@@ -427,6 +504,7 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
   // 래퍼 collapse: "직계 부모"가 같은 agent인 프로세스만 제외 (node 래퍼 → 바이너리는 항상
   // 직접 부모-자식). 진짜 동종 서브에이전트는 셸(zsh -c)을 거쳐 스폰되므로 걸러지지 않음.
   const agents = input.agents.filter((p) => {
+    if (detectAgent(p.command) === null) return false;
     const parent = byPid.get(p.ppid);
     return !(parent && detectAgent(parent.command) === detectAgent(p.command));
   });
@@ -439,10 +517,10 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
   // pass 0(등록된 경우) 외 어떤 세션도 이 프로세스를 클레임할 수 없다. 바인딩 세션이
   // 아직 미등록일 때 같은 pid를 기록한 옛 세션이 pass 1/2로 가로채는 것(유령 부활 +
   // 플레이스홀더 누락)을 막는다.
-  const boundKeyByPid = new Map<number, string>();
+  const boundKeyByPid = new Map<number, string | null>();
   for (const [pid, binding] of codexBindings ?? []) {
     if (detectAgent(byPid.get(pid)?.command ?? '') !== 'codex') continue;
-    boundKeyByPid.set(agentOwner(pid, byPid), `codex:${binding.sessionId}`);
+    boundKeyByPid.set(agentOwner(pid, byPid), binding ? `codex:${binding.sessionId}` : null);
   }
   if (nativeBindings) {
     for (const [pid, nat] of nativeBindings) {
@@ -469,6 +547,12 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
     sessions
       .filter((s) => s.agent === agent)
       .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+
+  // A cwd is not proof of ownership. Never transfer a previously mapped session
+  // to a new process, or attach an app/IDE transcript to an unrelated CLI.
+  const canGuess = (s: ReconcileSession): boolean =>
+    s.pid === undefined && s.processAlive !== false &&
+    !(s.agent === 'codex' && s.sessionSource === 'vscode');
 
   /**
    * 프로세스가 속한 VS Code 터미널(shell pid) 결정.
@@ -530,7 +614,8 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
     const key = boundKeyByPid.get(proc.pid);
     if (!key || agentOf(proc) !== 'codex') continue;
     const match = sessions.find((s) => s.key === key && !claimedSessions.has(key));
-    if (match) claim(proc, match, 'exact');
+    const binding = [...codexBindings ?? []].find(([pid, b]) => b && agentOwner(pid, byPid) === proc.pid)?.[1];
+    if (match) claim(proc, match, binding?.mapping ?? 'exact');
   }
 
   // pass 0: Claude Code 자체 선언 (~/.claude/sessions/<pid>.json) — 추측이 아닌 사실.
@@ -572,7 +657,7 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
     const cwd = cwdByPid.get(proc.pid);
     if (cwd === undefined) continue;
     const match = byAgentRecent(agent).find(
-      (s) => (s.launchCwd ?? s.cwd) === cwd && s.processAlive !== false &&
+      (s) => (s.launchCwd ?? s.cwd) === cwd && canGuess(s) &&
         !claimedSessions.has(s.key) && claimAllowed(proc, s.key),
     );
     if (match) claim(proc, match, 'heuristic');
@@ -588,8 +673,8 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
     // pid 이력이 있는 세션 제외 — 방금 죽은 세션이 새 프로세스를 선점(유령 부활)하지 않도록.
     // 새로 시작한 세션은 아직 매핑된 적이 없어 pid가 undefined다.
     const cands = byAgentRecent(kind).filter(
-      (s) => !claimedSessions.has(s.key) && s.processAlive !== false &&
-        s.pid === undefined && now - s.lastActivityAt < PAIRING_FRESH_MS,
+      (s) => !claimedSessions.has(s.key) && canGuess(s) &&
+        now - s.lastActivityAt < PAIRING_FRESH_MS,
     );
     if (cands.length !== 1) continue;
     claim(procs[0], cands[0], 'heuristic');
@@ -644,14 +729,34 @@ export function reconcileSessions(input: ReconcileInput): ReconcileResult {
 }
 
 export class ProcessMapper {
-  async codexBindings(agents: ProcInfo[]): Promise<Map<number, CodexBinding>> {
-    const pids = agents.filter((p) => detectAgent(p.command) === 'codex').map((p) => p.pid);
+  async codexBindings(agents: ProcInfo[], byPid = new Map(agents.map((p) => [p.pid, p]))): Promise<CodexBindings> {
+    const clients = agents.filter((p) => detectAgent(p.command) === 'codex');
+    const servers = [...byPid.values()].filter((p) => isCodexServer(p.command));
+    const pids = [...clients, ...servers].map((p) => p.pid);
     if (pids.length === 0) return new Map();
     try {
       const { stdout } = await execFileP('lsof', ['-a', '-p', pids.join(','), '-Fn'], {
         timeout: 3_000, maxBuffer: 8 * 1024 * 1024,
       });
-      return parseCodexBindings(stdout);
+      const open = parseCodexOpenFiles(stdout);
+      const result: CodexBindings = new Map();
+      for (const client of clients) {
+        if (open.has(client.pid)) result.set(agentOwner(client.pid, byPid), null);
+      }
+      for (const client of clients) {
+        const files = open.get(client.pid);
+        if (files?.length === 1) result.set(agentOwner(client.pid, byPid), files[0]);
+      }
+      const shared = new Map<string, CodexDaemonSession>();
+      for (const server of servers) {
+        for (const binding of open.get(server.pid) ?? []) {
+          const meta = await readCodexMetadata(binding.filePath);
+          if (meta) shared.set(binding.sessionId, { ...binding, ...meta });
+        }
+      }
+      const owners = clients.filter((p) => agentOwner(p.pid, byPid) === p.pid && !result.get(p.pid));
+      for (const [pid, binding] of bindCodexClients(owners, [...shared.values()])) result.set(pid, binding);
+      return result;
     } catch {
       return new Map();
     }
@@ -686,8 +791,9 @@ export class ProcessMapper {
 
   async snapshot(): Promise<{ ok: boolean; byPid: Map<number, ProcInfo>; agents: ProcInfo[] }> {
     try {
-      const { stdout } = await execFileP('ps', ['-axo', 'pid=,ppid=,pcpu=,command='], {
-        maxBuffer: 8 * 1024 * 1024,
+      const { stdout } = await execFileP('ps', ['-axo', 'pid=,ppid=,pcpu=,lstart=,command='], {
+        env: { ...process.env, LC_ALL: 'C' },
+        timeout: 3_000, maxBuffer: 8 * 1024 * 1024,
       });
       const procs = parsePsOutput(stdout);
       const byPid = new Map(procs.map((p) => [p.pid, p]));
@@ -700,11 +806,32 @@ export class ProcessMapper {
 
   async cwdOf(pid: number): Promise<string | undefined> {
     try {
-      const { stdout } = await execFileP('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn']);
+      const { stdout } = await execFileP('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
+        timeout: 3_000,
+      });
       const m = stdout.match(/^n(.+)$/m);
       return m ? m[1] : undefined;
     } catch {
       return undefined;
     }
+  }
+}
+
+async function readCodexMetadata(file: string): Promise<{ createdAt: number; originator?: string } | undefined> {
+  const handle = await fs.open(file, 'r').catch(() => undefined);
+  if (!handle) return undefined;
+  try {
+    const buffer = Buffer.alloc(256 * 1024);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const first = buffer.subarray(0, bytesRead).toString('utf8').split('\n')[0];
+    const row = JSON.parse(first);
+    if (row.type !== 'session_meta') return undefined;
+    const createdAt = Date.parse(row.payload?.timestamp ?? row.timestamp);
+    if (!Number.isFinite(createdAt)) return undefined;
+    return { createdAt, originator: row.payload?.originator };
+  } catch {
+    return undefined;
+  } finally {
+    await handle.close();
   }
 }

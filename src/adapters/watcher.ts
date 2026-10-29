@@ -118,8 +118,9 @@ export class AdapterWatcher {
   ) {}
 
   async scan(now: number): Promise<void> {
-    const files = [...new Set([...await this.spec.listFiles(), ...this.discoveredFiles])];
+    const discovered = new Set(this.discoveredFiles);
     this.discoveredFiles.clear();
+    const files = [...new Set([...await this.spec.listFiles(), ...discovered])];
     // listFiles()가 스캔 범위(codex: 오늘+어제 디렉토리)를 벗어나도, 이미 추적 중이던 파일은
     // 디스크에 남아있는 한 계속 스캔 대상에 포함 — 장기 세션이 tail에서 이탈하지 않도록 (F4)
     const seen = new Set(files);
@@ -155,7 +156,9 @@ export class AdapterWatcher {
       const st = await fs.stat(f).catch(() => null);
       const eventTime = st?.mtimeMs ?? now;
       const acc = this.accums.get(f)!;
-      if (!changed && !isNew && !reset) {
+      // A client may resume an unchanged rollout whose old card was removed.
+      // Explicit process discovery republishes it even without a new log line.
+      if (!changed && !isNew && !reset && !discovered.has(f)) {
         // 파서가 모르는 라인이라도 append 자체는 활동 신호 — 최소 patch로 lastActivityAt만 갱신
         // (완전 무음이면 running 세션이 idle로 오판됨)
         if (lineCount > 0) {

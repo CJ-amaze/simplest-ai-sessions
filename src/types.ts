@@ -11,6 +11,7 @@ export interface TmuxRef {
 
 /** 어댑터/훅이 갱신 가능한 세션 필드 (식별자 제외) */
 export interface SessionFields {
+  sessionSource?: string;  // Codex session_meta.source (cli/exec/vscode) — heuristic ownership guard
   cwd?: string;
   launchCwd?: string;       // 세션 시작 시점 cwd — 프로세스 OS cwd와 일치 (세션 내부 cd에도 불변)
   gitBranch?: string;
@@ -32,6 +33,7 @@ export interface SessionFields {
 }
 
 export interface SessionState extends Required<Pick<SessionFields, 'lastActivityAt'>> {
+  sessionSource?: string;
   key: string;              // `${agent}:${sessionId}`
   agent: AgentKind;
   sessionId: string;
